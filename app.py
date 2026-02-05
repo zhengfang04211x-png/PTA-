@@ -1,8 +1,8 @@
 """
-PTA期货交易策略回测系统 - Streamlit网页版
-==========================================
+PTA期货交易策略回测系统 - Streamlit网页版（平民化版本）
+=======================================================
 
-基于PX-石脑油价差"领先效应"的PTA期货交易策略回测系统
+基于PX原料利润"领先效应"的PTA期货交易策略回测系统
 支持参数调整、实时回测、结果可视化
 
 运行方式：
@@ -49,16 +49,12 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    .big-metric {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #1f77b4;
-    }
-    .positive {
-        color: #28a745;
-    }
-    .negative {
-        color: #dc3545;
+    .plain-summary {
+        background-color: #f0f2f6;
+        padding: 1.5rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #1f77b4;
     }
     .stButton>button {
         width: 100%;
@@ -72,6 +68,22 @@ st.markdown("""
 
 # 标题
 st.markdown('<div class="main-header">📈 PTA期货交易策略回测系统</div>', unsafe_allow_html=True)
+
+# 大白话总结
+st.markdown("""
+<div class="plain-summary">
+<h3>💡 策略核心思想（大白话版）</h3>
+<p><strong>本策略的核心就是：看上游PX原料赚不赚钱。</strong></p>
+<ul>
+<li>如果PX原料利润突然大涨（超过日常波动的1.5倍），说明上游成本在推涨，PTA迟早也要跟着涨</li>
+<li>但如果PTA生产利润太低（低于450元/吨），说明行业在亏钱，这时候做多更安全</li>
+<li>持仓15天左右，因为成本传导需要时间</li>
+<li>如果基差（现货价格-期货价格）连续3天走弱，说明现货相对期货走弱，现货支撑减弱，赶紧止盈跑路</li>
+</ul>
+<p><strong>简单说：上游赚钱→成本推涨→PTA涨价，我们提前布局赚差价！</strong></p>
+</div>
+""", unsafe_allow_html=True)
+
 st.markdown("---")
 
 # 侧边栏 - 参数配置
@@ -80,9 +92,9 @@ st.sidebar.header("⚙️ 策略参数配置")
 # 数据文件上传
 st.sidebar.subheader("📁 数据文件")
 uploaded_file = st.sidebar.file_uploader(
-    "上传利润指标合并数据CSV文件",
+    "上传数据文件（CSV格式）",
     type=['csv'],
-    help="请上传包含 date, futures_price, px_naphtha_spread, pta_margin 列的CSV文件"
+    help="⚠️ 重要：必须包含'期货价格'列（futures_price或主力合约期货价格），不是现货价格！需要包含：日期、期货价格、PX原料利润等"
 )
 
 # 使用上传的数据
@@ -96,50 +108,61 @@ else:
 
 # 信号生成参数
 st.sidebar.subheader("📊 信号生成参数")
+
 px_atr_period = st.sidebar.slider(
-    "PX价差ATR周期",
+    "观察PX原料利润的周期（天数）",
     min_value=5,
     max_value=50,
     value=CONFIG.PX_ATR_PERIOD,
     step=5,
-    help="PX价差ATR计算周期（交易日）"
+    help="用来计算PX原料利润日常波动剧烈程度的观察天数",
+    key="px_atr_period"
 )
+st.sidebar.caption("💡 建议设为20天，太短容易误判，太长反应太慢")
 
 px_atr_multiplier = st.sidebar.slider(
-    "PX价差ATR倍数",
+    "PX原料利润变动倍数",
     min_value=0.5,
     max_value=3.0,
     value=CONFIG.PX_ATR_MULTIPLIER,
     step=0.1,
-    help="动态阈值 = ATR倍数 × PX_ATR"
+    help="当PX原料利润变动超过日常波动的多少倍时，才认为是'大行情'",
+    key="px_atr_multiplier"
 )
+st.sidebar.caption("💡 数值越大越谨慎，只抓大行情。1.5倍是平衡点，既能抓住机会又不会太敏感")
 
 # 估值过滤器参数
-st.sidebar.subheader("💰 估值过滤器")
+st.sidebar.subheader("💰 安全垫过滤器")
 enable_margin_filter = st.sidebar.checkbox(
-    "启用估值过滤器",
+    "启用安全垫过滤器",
     value=CONFIG.ENABLE_MARGIN_FILTER,
-    help="是否启用估值过滤器"
+    help="只在PTA生产利润足够低时才做多，避免高位接盘",
+    key="enable_margin_filter"
 )
+st.sidebar.caption("💡 开启后，只在PTA生产利润很低时才做多，这样更安全")
 
 if enable_margin_filter:
     margin_long = st.sidebar.number_input(
-        "做多估值阈值 (元/吨)",
+        "做多安全垫阈值（元/吨）",
         min_value=0,
         max_value=1000,
         value=CONFIG.MARGIN_LONG_THRESHOLD,
         step=10,
-        help="仅在pta_margin < 此值时执行做多"
+        help="只有当PTA生产利润低于此值时才做多",
+        key="margin_long"
     )
+    st.sidebar.caption("💡 建议450元/吨。低于这个值说明行业在亏钱，做多更安全")
     
     margin_short = st.sidebar.number_input(
-        "做空估值阈值 (元/吨)",
+        "做空安全垫阈值（元/吨）",
         min_value=0,
         max_value=1000,
         value=CONFIG.MARGIN_SHORT_THRESHOLD,
         step=10,
-        help="仅在pta_margin > 此值时执行做空"
+        help="只有当PTA生产利润高于此值时才做空",
+        key="margin_short"
     )
+    st.sidebar.caption("💡 建议750元/吨。高于这个值说明行业利润很高，做空更安全")
 else:
     margin_long = CONFIG.MARGIN_LONG_THRESHOLD
     margin_short = CONFIG.MARGIN_SHORT_THRESHOLD
@@ -147,84 +170,131 @@ else:
 # 交易执行参数
 st.sidebar.subheader("💼 交易执行参数")
 initial_capital = st.sidebar.number_input(
-    "初始资金 (元)",
+    "初始资金（元）",
     min_value=100000,
     max_value=10000000,
     value=CONFIG.INITIAL_CAPITAL,
     step=100000,
-    format="%d"
+    format="%d",
+    key="initial_capital"
 )
+st.sidebar.caption("💡 回测的起始资金，不影响策略逻辑")
 
 position_size = st.sidebar.slider(
-    "仓位比例 (%)",
+    "每次投入资金比例（%）",
     min_value=1,
     max_value=100,
     value=int(CONFIG.POSITION_SIZE * 100),
     step=1,
-    help="每次交易的仓位比例"
+    help="每次交易投入多少比例的资金（基础仓位，会根据加工费自动调整）",
+    key="position_size"
 ) / 100
+st.sidebar.caption("💡 建议10-20%。不要满仓，留点余地应对波动。实际仓位会根据加工费自动调整")
+
+enable_dynamic_position = st.sidebar.checkbox(
+    "启用分级仓位（根据加工费自动调整）",
+    value=CONFIG.ENABLE_DYNAMIC_POSITION,
+    help="加工费越低仓位越大，加工费越高仓位越小",
+    key="enable_dynamic_position"
+)
+if enable_dynamic_position:
+    st.sidebar.caption("💡 加工费<350元/吨：仓位×1.5倍（更激进）")
+    st.sidebar.caption("💡 加工费>600元/吨：仓位×0.5倍（更保守）")
 
 holding_period = st.sidebar.slider(
-    "固定持仓周期 (交易日)",
+    "持仓天数",
     min_value=5,
     max_value=30,
     value=CONFIG.HOLDING_PERIOD,
-    step=1
+    step=1,
+    key="holding_period"
 )
+st.sidebar.caption("💡 建议15-18天，因为成本传导需要时间，太短吃不到红利，太长风险大")
 
 # 风险控制参数
 st.sidebar.subheader("🛡️ 风险控制参数")
 atr_multiplier = st.sidebar.slider(
-    "ATR止损倍数",
+    "价格波动剧烈程度倍数（止损用）",
     min_value=0.5,
     max_value=3.0,
     value=CONFIG.ATR_MULTIPLIER,
-    step=0.1
+    step=0.1,
+    key="atr_multiplier"
 )
+st.sidebar.caption("💡 数值越大止损越宽松，1.5倍是平衡点。如果价格跌超过日常波动的1.5倍，说明跌太快了，赶紧止损")
 
 atr_period = st.sidebar.slider(
-    "ATR计算周期 (交易日)",
+    "计算价格波动剧烈程度的周期（天数）",
     min_value=5,
     max_value=30,
     value=CONFIG.ATR_PERIOD,
-    step=1
+    step=1,
+    key="atr_period"
 )
+st.sidebar.caption("💡 用来计算价格日常波动剧烈程度的天数，建议14天")
 
-px_reverse_threshold = st.sidebar.slider(
-    "PX反向止损阈值 (%)",
-    min_value=1.0,
-    max_value=10.0,
-    value=CONFIG.PX_REVERSE_THRESHOLD,
-    step=0.5
+enable_px_ma_stop = st.sidebar.checkbox(
+    "启用PX价差均线止损",
+    value=CONFIG.ENABLE_PX_MA_STOP,
+    help="当PX价差收盘价跌破5日均线时触发止损（替代原来的反向变动止损）",
+    key="enable_px_ma_stop"
 )
+st.sidebar.caption("💡 开启后，如果PX价差跌破5日均线，说明趋势转弱，防止被日内波动洗出场")
+
+px_ma_period = st.sidebar.slider(
+    "PX价差均线周期（天）",
+    min_value=3,
+    max_value=10,
+    value=CONFIG.PX_MA_PERIOD,
+    step=1,
+    key="px_ma_period"
+)
+st.sidebar.caption("💡 用来计算PX价差的均线，建议5天")
 
 # 止盈参数
 st.sidebar.subheader("🎯 止盈参数")
 enable_basis_tp = st.sidebar.checkbox(
-    "启用基差止盈",
+    "启用基差止盈（现货涨不动时提前落袋）",
     value=CONFIG.ENABLE_BASIS_TAKE_PROFIT,
-    help="是否启用基差止盈功能"
+    help="持仓超过7天且盈利>2%时，如果基差连续走弱则提前止盈",
+    key="enable_basis_tp"
 )
+st.sidebar.caption("💡 开启后，如果持仓超过7天且盈利>2%，基差（现货价格-期货价格）连续走弱，说明现货涨不动了，提前落袋")
 
 if enable_basis_tp:
     basis_tp_threshold = st.sidebar.slider(
-        "基差止盈盈利阈值 (%)",
+        "止盈盈利阈值（%）",
         min_value=0.5,
         max_value=5.0,
         value=CONFIG.BASIS_TAKE_PROFIT_THRESHOLD,
-        step=0.1
+        step=0.1,
+        key="basis_tp_threshold"
     )
+    st.sidebar.caption("💡 只有盈利超过这个值，才会考虑提前止盈")
+    
+    basis_min_holding = st.sidebar.slider(
+        "基差止盈最小持仓天数",
+        min_value=5,
+        max_value=15,
+        value=CONFIG.BASIS_MIN_HOLDING_DAYS,
+        step=1,
+        key="basis_min_holding"
+    )
+    st.sidebar.caption("💡 只有持仓超过这个天数，才会触发基差止盈，建议7天")
     
     basis_decline_days = st.sidebar.slider(
         "基差连续走弱天数",
         min_value=2,
         max_value=7,
         value=CONFIG.BASIS_DECLINE_DAYS,
-        step=1
+        step=1,
+        key="basis_decline_days"
     )
+    st.sidebar.caption("💡 如果基差（现货价格-期货价格）连续这么多天走弱，说明现货涨不动了，提前落袋")
 else:
     basis_tp_threshold = CONFIG.BASIS_TAKE_PROFIT_THRESHOLD
     basis_decline_days = CONFIG.BASIS_DECLINE_DAYS
+    basis_min_holding = CONFIG.BASIS_MIN_HOLDING_DAYS
 
 # 主界面
 st.header("🚀 策略回测")
@@ -235,16 +305,20 @@ with col2:
     run_backtest = st.button("🚀 开始回测", type="primary", use_container_width=True)
     st.markdown("---")
     st.markdown("### 📝 当前参数")
-    st.write(f"- PX ATR周期: {px_atr_period}")
-    st.write(f"- PX ATR倍数: {px_atr_multiplier}")
+    st.write(f"- 观察周期: {px_atr_period}天")
+    st.write(f"- PX利润变动倍数: {px_atr_multiplier}倍")
     st.write(f"- 初始资金: {initial_capital:,.0f} 元")
-    st.write(f"- 仓位比例: {position_size*100:.1f}%")
-    st.write(f"- 持仓周期: {holding_period} 天")
-    st.write(f"- ATR止损: {atr_multiplier}×")
+    st.write(f"- 投入比例: {position_size*100:.1f}%")
+    st.write(f"- 持仓天数: {holding_period} 天")
+    st.write(f"- 价格波动倍数: {atr_multiplier}×")
+    if enable_px_ma_stop:
+        st.write(f"- PX均线止损: 启用（{px_ma_period}日均线）")
     if enable_margin_filter:
-        st.write(f"- 估值过滤: 启用")
+        st.write(f"- 安全垫过滤: 启用（做多阈值: {margin_long}元/吨）")
+    if enable_dynamic_position:
+        st.write(f"- 分级仓位: 启用")
     if enable_basis_tp:
-        st.write(f"- 基差止盈: 启用")
+        st.write(f"- 基差止盈（现货涨不动时提前落袋）: 启用")
 
 with col1:
     if run_backtest:
@@ -265,10 +339,13 @@ with col1:
                 CONFIG.HOLDING_PERIOD = holding_period
                 CONFIG.ATR_MULTIPLIER = atr_multiplier
                 CONFIG.ATR_PERIOD = atr_period
-                CONFIG.PX_REVERSE_THRESHOLD = px_reverse_threshold
+                CONFIG.ENABLE_PX_MA_STOP = enable_px_ma_stop
+                CONFIG.PX_MA_PERIOD = px_ma_period
                 CONFIG.ENABLE_BASIS_TAKE_PROFIT = enable_basis_tp
                 CONFIG.BASIS_TAKE_PROFIT_THRESHOLD = basis_tp_threshold
                 CONFIG.BASIS_DECLINE_DAYS = basis_decline_days
+                CONFIG.BASIS_MIN_HOLDING_DAYS = basis_min_holding
+                CONFIG.ENABLE_DYNAMIC_POSITION = enable_dynamic_position
                 
                 # 加载数据
                 df = load_merged_data_with_basis(data_path)
@@ -277,7 +354,7 @@ with col1:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                status_text.text("正在生成交易信号...")
+                status_text.text("正在分析PX原料利润变动，发现原料端涨价机会，准备建仓...")
                 progress_bar.progress(20)
                 df_signals = generate_signals(
                     df,
@@ -287,7 +364,7 @@ with col1:
                 )
                 
                 # 回测策略
-                status_text.text("正在执行策略回测...")
+                status_text.text("正在模拟交易，计算盈亏...（如果成本支撑崩了或价格跌太快，会触发止损跑路）")
                 progress_bar.progress(60)
                 results = backtest_strategy(
                     df_signals,
@@ -295,7 +372,6 @@ with col1:
                     position_size=position_size,
                     holding_period=holding_period,
                     atr_multiplier=atr_multiplier,
-                    px_reverse_threshold=px_reverse_threshold,
                     basis_take_profit_threshold=basis_tp_threshold
                 )
                 
@@ -327,7 +403,6 @@ if 'results' in st.session_state:
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        return_color = "positive" if results['总收益率'] > 0 else "negative"
         st.metric(
             "总收益率",
             f"{results['总收益率']:.2f}%",
@@ -342,7 +417,6 @@ if 'results' in st.session_state:
         )
     
     with col3:
-        win_rate_color = "positive" if results['胜率'] > 0.5 else "negative"
         st.metric(
             "胜率",
             f"{results['胜率']:.2%}",
@@ -350,18 +424,17 @@ if 'results' in st.session_state:
         )
     
     with col4:
-        sharpe_color = "positive" if results['夏普比率'] >= CONFIG.SHARPE_TARGET else "negative"
         st.metric(
-            "夏普比率",
+            "稳健度（每承担一份风险换来的钱）",
             f"{results['夏普比率']:.2f}",
-            help="风险调整后的收益指标，≥1.0为优秀"
+            help="≥1.0为优秀，数值越高说明策略越稳健"
         )
     
     with col5:
         st.metric(
-            "最大回撤",
+            "最倒霉时亏了多少",
             f"{results['最大回撤']:.2f}%",
-            delta="风险指标",
+            delta="风险指标（越小越好）",
             delta_color="inverse"
         )
     
@@ -373,7 +446,7 @@ if 'results' in st.session_state:
     
     with col1:
         st.metric("最终资金", f"{results['最终资金']:,.0f} 元")
-        st.metric("盈亏比", f"{results['盈亏比']:.2f}")
+        st.metric("平均赚的钱 / 平均亏的钱（盈亏比）", f"{results['盈亏比']:.2f}")
     
     with col2:
         if len(results['交易记录']) > 0:
@@ -408,25 +481,25 @@ if 'results' in st.session_state:
     
     # 净值曲线
     st.markdown("---")
-    st.subheader("📈 净值曲线")
+    st.subheader("📈 资金曲线")
     
     fig, ax = plt.subplots(figsize=(14, 6))
     font_prop = get_chinese_font_prop()
     
     equity_curve = results['净值曲线']
     ax.plot(range(len(equity_curve)), equity_curve, 
-            color="#1f77b4", linewidth=2, label="账户净值")
+            color="#1f77b4", linewidth=2, label="账户资金")
     ax.axhline(y=equity_curve.iloc[0], color="gray", linestyle="--", 
                linewidth=1, alpha=0.5, label="初始资金")
     
     # 标注关键点
     max_equity_idx = equity_curve.idxmax()
     ax.scatter([max_equity_idx], [equity_curve.iloc[max_equity_idx]], 
-              color="green", s=100, zorder=5, label="最高净值")
+              color="green", s=100, zorder=5, label="最高资金")
     
     ax.set_xlabel("交易日", fontproperties=font_prop, fontsize=12)
-    ax.set_ylabel("账户净值（元）", fontproperties=font_prop, fontsize=12)
-    ax.set_title("策略净值曲线", fontproperties=font_prop, fontsize=14, fontweight="bold")
+    ax.set_ylabel("账户资金（元）", fontproperties=font_prop, fontsize=12)
+    ax.set_title("策略资金曲线", fontproperties=font_prop, fontsize=14, fontweight="bold")
     ax.legend(prop=font_prop, fontsize=10)
     ax.grid(True, alpha=0.3)
     
@@ -458,7 +531,7 @@ if 'results' in st.session_state:
     
     ax.set_xlabel("日期", fontproperties=font_prop, fontsize=12)
     ax.set_ylabel("PTA期货价格（元/吨）", fontproperties=font_prop, fontsize=12)
-    ax.set_title("PTA期货价格走势与交易信号", fontproperties=font_prop, fontsize=14, fontweight="bold")
+    ax.set_title("PTA期货价格走势与交易信号（⚠️ 使用期货价格，非现货）", fontproperties=font_prop, fontsize=14, fontweight="bold")
     ax.legend(prop=font_prop, fontsize=10)
     ax.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
@@ -489,10 +562,20 @@ if 'results' in st.session_state:
         
         with col2:
             st.write("**按平仓原因统计**")
+            exit_reasons_map = {
+                "固定持仓周期": "持仓到期（15天到了）",
+                "价格止损": "价格跌太快，止损跑路",
+                "PX价差跌破均线止损": "PX价差跌破5日均线，趋势转弱，止损跑路",
+                "PX价差突破均线止损": "PX价差突破5日均线，趋势转强，止损跑路",
+                "基差止盈": "现货涨不动时提前落袋（基差走弱）",
+                "回测结束强制平仓": "回测结束"
+            }
             exit_stats = trades_df.groupby("exit_reason").agg({
                 "pnl": ["count", "sum", "mean"]
             }).round(2)
             exit_stats.columns = ["交易次数", "累计盈亏", "平均盈亏"]
+            # 重命名索引
+            exit_stats.index = [exit_reasons_map.get(idx, idx) for idx in exit_stats.index]
             st.dataframe(exit_stats, use_container_width=True)
         
         # 盈亏分布
@@ -567,6 +650,9 @@ if 'results' in st.session_state:
         display_df.columns = ["入场日期", "出场日期", "类型", "入场价", "出场价", 
                               "盈亏(元)", "收益率(%)", "持仓天数", "平仓原因"]
         
+        # 替换平仓原因
+        display_df["平仓原因"] = display_df["平仓原因"].map(exit_reasons_map).fillna(display_df["平仓原因"])
+        
         st.dataframe(display_df, use_container_width=True, height=400)
         
         # 下载按钮
@@ -586,6 +672,6 @@ else:
 # 页脚
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: #666;'>PTA期货交易策略回测系统 | 基于PX-石脑油价差领先效应</div>",
+    "<div style='text-align: center; color: #666;'>PTA期货交易策略回测系统 | 基于PX原料利润领先效应</div>",
     unsafe_allow_html=True
 )

@@ -37,12 +37,21 @@ class StrategyConfig:
     # ========== 风险控制参数 ==========
     ATR_MULTIPLIER = 1.5  # 价格ATR止损倍数
     ATR_PERIOD = 14  # 价格ATR计算周期（交易日）
-    PX_REVERSE_THRESHOLD = 3.0  # PX价差反向变动止损阈值（%）
+    PX_MA_PERIOD = 5  # PX价差均线周期（用于动态止损）
+    ENABLE_PX_MA_STOP = True  # 是否启用PX均线止损（替代原来的PX反向变动止损）
     
     # ========== 止盈参数 ==========
     BASIS_TAKE_PROFIT_THRESHOLD = 2.0  # 基差止盈盈利阈值（%）
     BASIS_DECLINE_DAYS = 3  # 基差连续走弱天数
+    BASIS_MIN_HOLDING_DAYS = 7  # 基差止盈最小持仓天数
     ENABLE_BASIS_TAKE_PROFIT = True  # 是否启用基差止盈
+    
+    # ========== 分级仓位参数 ==========
+    ENABLE_DYNAMIC_POSITION = True  # 是否启用分级仓位
+    MARGIN_LOW_THRESHOLD = 350  # 低加工费阈值（仓位放大1.5倍）
+    MARGIN_HIGH_THRESHOLD = 600  # 高加工费阈值（仓位缩小至0.5倍）
+    POSITION_MULTIPLIER_LOW = 1.5  # 低加工费时的仓位倍数
+    POSITION_MULTIPLIER_HIGH = 0.5  # 高加工费时的仓位倍数
     
     # ========== 绩效评估参数 ==========
     SHARPE_TARGET = 1.0  # 夏普比率目标值
@@ -120,14 +129,22 @@ def load_merged_data_with_basis(merged_csv_path=None, pta_csv_path=None) -> pd.D
     
     result = pd.DataFrame({"date": df[date_col]})
     
-    # 期货价格
+    # 期货价格（必须！不是现货价格！）
+    # 优先查找：futures_price, 主力合约期货价格, 期货价格
     futures_cols = [c for c in df.columns if "futures" in str(c).lower() and "price" in str(c).lower()]
     if not futures_cols:
-        futures_cols = [c for c in df.columns if "期货" in str(c) and "价格" in str(c)]
+        # 查找中文列名：期货价格、主力合约期货价格
+        futures_cols = [c for c in df.columns if "期货" in str(c) and "价格" in str(c) and "现货" not in str(c)]
+    if not futures_cols:
+        # 查找：主力合约
+        futures_cols = [c for c in df.columns if "主力合约" in str(c) and "价格" in str(c)]
     if futures_cols:
         result["futures_price"] = pd.to_numeric(df[futures_cols[0]], errors="coerce")
+        print(f"[数据加载] 使用期货价格列: {futures_cols[0]}")
     else:
-        raise ValueError("未找到futures_price列")
+        # 列出所有列名帮助用户排查
+        available_cols = ", ".join(df.columns.tolist())
+        raise ValueError(f"未找到期货价格列！\n可用列名: {available_cols}\n请确保数据文件包含'futures_price'或包含'期货价格'的列（不是现货价格）")
     
     # PX-石脑油价差
     px_cols = [c for c in df.columns if "px" in str(c).lower() and "naphtha" in str(c).lower()]
@@ -169,7 +186,7 @@ def calculate_px_atr(df: pd.DataFrame, period: int = 20) -> pd.Series:
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """计算期货价格的ATR"""
+    """计算期货价格的ATR（使用futures_price，不是现货价格）"""
     df = df.copy()
     df = df.sort_values("date").reset_index(drop=True)
     high = df["futures_price"]
@@ -230,7 +247,6 @@ def backtest_strategy(df: pd.DataFrame,
                                 position_size: float = None, 
                                 holding_period: int = None,
                                 atr_multiplier: float = None, 
-                                px_reverse_threshold: float = None,
                                 basis_take_profit_threshold: float = None) -> dict:
     """回测策略"""
     if initial_capital is None:
@@ -241,8 +257,6 @@ def backtest_strategy(df: pd.DataFrame,
         holding_period = CONFIG.HOLDING_PERIOD
     if atr_multiplier is None:
         atr_multiplier = CONFIG.ATR_MULTIPLIER
-    if px_reverse_threshold is None:
-        px_reverse_threshold = CONFIG.PX_REVERSE_THRESHOLD
     if basis_take_profit_threshold is None:
         basis_take_profit_threshold = CONFIG.BASIS_TAKE_PROFIT_THRESHOLD
     
@@ -253,6 +267,9 @@ def backtest_strategy(df: pd.DataFrame,
     df["px_change_pct"] = df["px_naphtha_spread"].pct_change() * 100
     df["basis_change"] = df["basis"].diff()
     
+    # 计算PX价差的5日均线（用于动态止损）
+    df["px_ma5"] = df["px_naphtha_spread"].rolling(window=CONFIG.PX_MA_PERIOD, min_periods=1).mean()
+    
     capital = initial_capital
     equity_curve = [initial_capital]
     trades = []
@@ -260,10 +277,12 @@ def backtest_strategy(df: pd.DataFrame,
     
     for i in range(len(df)):
         current_date = df.loc[i, "date"]
-        current_price = df.loc[i, "futures_price"]
+        current_price = df.loc[i, "futures_price"]  # 期货价格，不是现货！
         current_px = df.loc[i, "px_naphtha_spread"]
+        current_px_ma5 = df.loc[i, "px_ma5"]
         current_atr = df.loc[i, "atr"]
         current_basis = df.loc[i, "basis"]
+        current_margin = df.loc[i, "pta_margin"] if "pta_margin" in df.columns else np.nan
         
         if current_position is not None:
             holding_days = (current_date - current_position["entry_date"]).days
@@ -286,16 +305,18 @@ def backtest_strategy(df: pd.DataFrame,
                     stop_loss_triggered = True
                     stop_loss_reason = "价格止损"
                 
-                px_reverse = current_position["entry_px"] - current_px
-                px_reverse_pct = (px_reverse / current_position["entry_px"]) * 100 if current_position["entry_px"] > 0 else 0
-                if px_reverse_pct > px_reverse_threshold:
-                    stop_loss_triggered = True
-                    stop_loss_reason = "PX反向变动止损"
+                # 动态止损：PX价差收盘价跌破5日均线（替代原来的PX反向变动止损）
+                if CONFIG.ENABLE_PX_MA_STOP and not pd.isna(current_px_ma5):
+                    if current_px < current_px_ma5:
+                        stop_loss_triggered = True
+                        stop_loss_reason = "PX价差跌破均线止损"
                 
+                # 基差止盈：持仓超过7天且盈利>2%，基差连续3天走弱
                 if (CONFIG.ENABLE_BASIS_TAKE_PROFIT and 
+                    holding_days >= CONFIG.BASIS_MIN_HOLDING_DAYS and
+                    pnl_pct > basis_take_profit_threshold and
                     not pd.isna(current_basis) and 
-                    len(current_position.get("basis_history", [])) >= CONFIG.BASIS_DECLINE_DAYS and
-                    pnl_pct > basis_take_profit_threshold):
+                    len(current_position.get("basis_history", [])) >= CONFIG.BASIS_DECLINE_DAYS):
                     basis_history = current_position["basis_history"][-CONFIG.BASIS_DECLINE_DAYS:]
                     if len(basis_history) == CONFIG.BASIS_DECLINE_DAYS:
                         basis_declining = all(basis_history[j] < basis_history[j-1] for j in range(1, CONFIG.BASIS_DECLINE_DAYS))
@@ -308,16 +329,18 @@ def backtest_strategy(df: pd.DataFrame,
                     stop_loss_triggered = True
                     stop_loss_reason = "价格止损"
                 
-                px_reverse = current_px - current_position["entry_px"]
-                px_reverse_pct = (px_reverse / abs(current_position["entry_px"])) * 100 if current_position["entry_px"] != 0 else 0
-                if px_reverse_pct > px_reverse_threshold:
-                    stop_loss_triggered = True
-                    stop_loss_reason = "PX反向变动止损"
+                # 动态止损：PX价差收盘价突破5日均线（做空时）
+                if CONFIG.ENABLE_PX_MA_STOP and not pd.isna(current_px_ma5):
+                    if current_px > current_px_ma5:
+                        stop_loss_triggered = True
+                        stop_loss_reason = "PX价差突破均线止损"
                 
+                # 基差止盈：持仓超过7天且盈利>2%，基差连续3天走强（做空时基差走强是利空）
                 if (CONFIG.ENABLE_BASIS_TAKE_PROFIT and 
+                    holding_days >= CONFIG.BASIS_MIN_HOLDING_DAYS and
+                    pnl_pct > basis_take_profit_threshold and
                     not pd.isna(current_basis) and 
-                    len(current_position.get("basis_history", [])) >= CONFIG.BASIS_DECLINE_DAYS and
-                    pnl_pct > basis_take_profit_threshold):
+                    len(current_position.get("basis_history", [])) >= CONFIG.BASIS_DECLINE_DAYS):
                     basis_history = current_position["basis_history"][-CONFIG.BASIS_DECLINE_DAYS:]
                     if len(basis_history) == CONFIG.BASIS_DECLINE_DAYS:
                         basis_rising = all(basis_history[j] > basis_history[j-1] for j in range(1, CONFIG.BASIS_DECLINE_DAYS))
@@ -326,7 +349,9 @@ def backtest_strategy(df: pd.DataFrame,
                             stop_loss_reason = "基差止盈"
             
             if holding_days >= holding_period:
-                pnl = capital * position_size * (pnl_pct / 100)
+                # 使用实际仓位（可能因分级仓位而调整）
+                actual_position_size = current_position.get("actual_position_size", position_size)
+                pnl = capital * actual_position_size * (pnl_pct / 100)
                 capital += pnl
                 trades.append({
                     "entry_date": current_position["entry_date"],
@@ -342,7 +367,9 @@ def backtest_strategy(df: pd.DataFrame,
                 current_position = None
             
             elif stop_loss_triggered:
-                pnl = capital * position_size * (pnl_pct / 100)
+                # 使用实际仓位（可能因分级仓位而调整）
+                actual_position_size = current_position.get("actual_position_size", position_size)
+                pnl = capital * actual_position_size * (pnl_pct / 100)
                 capital += pnl
                 trades.append({
                     "entry_date": current_position["entry_date"],
@@ -362,12 +389,22 @@ def backtest_strategy(df: pd.DataFrame,
                 entry_price = current_price
                 entry_px = current_px
                 stop_loss_price = entry_price - atr_multiplier * current_atr
+                
+                # 分级仓位：根据PTA生产利润调整仓位
+                actual_position_size = position_size
+                if CONFIG.ENABLE_DYNAMIC_POSITION and not pd.isna(current_margin):
+                    if current_margin < CONFIG.MARGIN_LOW_THRESHOLD:
+                        actual_position_size = position_size * CONFIG.POSITION_MULTIPLIER_LOW
+                    elif current_margin > CONFIG.MARGIN_HIGH_THRESHOLD:
+                        actual_position_size = position_size * CONFIG.POSITION_MULTIPLIER_HIGH
+                
                 current_position = {
                     "type": "long",
                     "entry_date": current_date,
                     "entry_price": entry_price,
                     "entry_px": entry_px,
                     "stop_loss": stop_loss_price,
+                    "actual_position_size": actual_position_size,
                     "basis_history": [current_basis] if not pd.isna(current_basis) else []
                 }
             elif i > 0 and df.loc[i-1, "short_signal"]:
@@ -388,6 +425,9 @@ def backtest_strategy(df: pd.DataFrame,
                 unrealized_pnl_pct = (current_price / current_position["entry_price"] - 1.0) * 100
             else:
                 unrealized_pnl_pct = (current_position["entry_price"] / current_price - 1.0) * 100
+            
+            # 更新实际仓位（用于计算未实现盈亏）
+            actual_position_size = current_position.get("actual_position_size", position_size)
             unrealized_pnl = capital * position_size * (unrealized_pnl_pct / 100)
             equity = capital + unrealized_pnl
         else:
@@ -403,7 +443,8 @@ def backtest_strategy(df: pd.DataFrame,
             pnl_pct = (last_price / current_position["entry_price"] - 1.0) * 100
         else:
             pnl_pct = (current_position["entry_price"] / last_price - 1.0) * 100
-        pnl = capital * position_size * (pnl_pct / 100)
+        actual_position_size = current_position.get("actual_position_size", position_size)
+        pnl = capital * actual_position_size * (pnl_pct / 100)
         capital += pnl
         trades.append({
             "entry_date": current_position["entry_date"],
@@ -446,13 +487,12 @@ def backtest_strategy(df: pd.DataFrame,
     return {
         "总交易次数": len(trades),
         "总收益率": total_return,
-        "最大回撤": max_drawdown,
+        "最大回撤": max_drawdown,  # 显示为"最倒霉时亏了多少"
         "胜率": win_rate,
-        "盈亏比": profit_loss_ratio,
-        "夏普比率": sharpe_ratio,
+        "盈亏比": profit_loss_ratio,  # 显示为"平均赚的钱 / 平均亏的钱"
+        "夏普比率": sharpe_ratio,  # 显示为"稳健度"
         "最终资金": equity_series.iloc[-1],
         "交易记录": trades,
         "净值曲线": equity_series
     }
-
 
