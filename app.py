@@ -431,16 +431,23 @@ with st.sidebar.expander("🛡️ 安全垫过滤器", expanded=False):
 with st.sidebar.expander("💼 交易执行参数", expanded=False):
     st.markdown("#### 💰 资金管理")
     
+    # 显示当前资金（用于计算示例）
+    if 'initial_capital' in st.session_state:
+        current_capital = st.session_state.get('initial_capital', initial_capital)
+    else:
+        current_capital = initial_capital
+    
     max_position_ratio = st.slider(
         "最大仓位比例（%）",
         min_value=10,
         max_value=100,
         value=int(CONFIG.MAX_POSITION_RATIO * 100),
         step=5,
-        help="最多使用多少比例的资金作为保证金（建议80%，留20%作为风险缓冲）",
+        help="最多使用多少比例的总资金作为保证金（例如：100万资金×80%=80万可用保证金）",
         key="max_position_ratio"
     ) / 100
-    st.caption("💡 建议80%，留20%作为风险缓冲")
+    available_margin_example = current_capital * max_position_ratio
+    st.caption(f"💡 建议80%，留20%作为风险缓冲 | 当前资金{current_capital:,.0f}元 × {int(max_position_ratio*100)}% = {available_margin_example:,.0f}元可用保证金")
     
     position_size = st.slider(
         "每次投入比例（%）",
@@ -448,10 +455,41 @@ with st.sidebar.expander("💼 交易执行参数", expanded=False):
         max_value=int(max_position_ratio * 100),
         value=int(CONFIG.POSITION_SIZE * 100),
         step=1,
-        help=f"在最大仓位比例内，每次交易投入多少比例的资金（最多{int(max_position_ratio*100)}%）",
+        help=f"在可用保证金内，每次开仓投入多少比例（例如：{available_margin_example:,.0f}元可用保证金 × 10% = {available_margin_example*0.1:,.0f}元用于本次开仓）",
         key="position_size"
     ) / 100
-    st.caption(f"💡 建议10-20%，不超过最大仓位比例{int(max_position_ratio*100)}%")
+    invested_margin_example = available_margin_example * position_size
+    st.caption(f"💡 建议10-20% | {available_margin_example:,.0f}元可用保证金 × {int(position_size*100)}% = {invested_margin_example:,.0f}元用于本次开仓")
+    
+    # 详细说明
+    with st.expander("📖 资金管理参数说明", expanded=False):
+        st.markdown("""
+        **两个参数的关系：**
+        
+        1. **最大仓位比例** = 总资金的安全上限
+           - 例如：100万资金 × 80% = 80万可用保证金
+           - 这是**所有持仓**加起来最多能用的资金
+           - 建议80%，留20%作为风险缓冲
+        
+        2. **每次投入比例** = 单次开仓的资金比例
+           - 例如：80万可用保证金 × 10% = 8万用于本次开仓
+           - 这是**每次新开仓**时投入的资金
+           - 建议10-20%，分散风险
+        
+        **计算手数的流程：**
+        ```
+        总资金 = 100万
+        可用保证金 = 100万 × 最大仓位比例(80%) = 80万
+        本次投入 = 80万 × 每次投入比例(10%) = 8万
+        合约价值 = 8万 × 杠杆倍数(10倍) = 80万
+        手数 = 80万 ÷ (价格6000元/吨 × 5吨/手) = 26手
+        ```
+        
+        **为什么这样设计？**
+        - 最大仓位比例：防止满仓，留出风险缓冲
+        - 每次投入比例：避免单次投入过大，分散风险
+        - 随着资金增长，可开手数自动增加
+        """)
     
     enable_dynamic_position = st.checkbox(
         "启用分级仓位（根据加工费自动调整）",
@@ -1043,9 +1081,6 @@ if 'results' in st.session_state:
         if len(resonance_data) > 0:
             resonance_df = pd.DataFrame(resonance_data)
             
-            # 获取字体属性（用于matplotlib图表）
-            font_prop = get_chinese_font_prop()
-            
             # 统计共振情况
             resonance_counts = resonance_df['resonance'].value_counts()
             
@@ -1065,29 +1100,50 @@ if 'results' in st.session_state:
                         resonance_stats_df = pd.DataFrame(resonance_stats)
                         resonance_stats_df = resonance_stats_df.sort_values('类型', ascending=False)  # 共振在前
                         
-                        fig, ax = plt.subplots(figsize=(8, 6))
+                        # 使用Plotly绘制图表（完美支持中文）
+                        fig = go.Figure()
+                        
+                        # 设置颜色
                         colors_list = ['#28a745' if x > 50 else '#ffc107' for x in resonance_stats_df['胜率(%)']]
-                        bars = ax.bar(resonance_stats_df['类型'], resonance_stats_df['胜率(%)'], 
-                                     color=colors_list, alpha=0.7, edgecolor='black', linewidth=2)
                         
-                        # 添加数值标签
-                        for i, bar in enumerate(bars):
-                            height = bar.get_height()
-                            count = resonance_stats_df.iloc[i]['交易次数']
-                            ax.text(bar.get_x() + bar.get_width()/2., height,
-                                   f'{height:.1f}%\n({count}次)',
-                                   ha='center', va='bottom', fontsize=11, fontweight='bold',
-                                   fontproperties=font_prop)
+                        # 添加柱状图
+                        fig.add_trace(go.Bar(
+                            x=resonance_stats_df['类型'],
+                            y=resonance_stats_df['胜率(%)'],
+                            marker_color=colors_list,
+                            marker_line_color='black',
+                            marker_line_width=2,
+                            text=[f'{row["胜率(%)"]:.1f}%<br>({row["交易次数"]}次)' 
+                                  for _, row in resonance_stats_df.iterrows()],
+                            textposition='outside',
+                            textfont=dict(size=11, color='black', family='Arial'),
+                            hovertemplate='类型: %{x}<br>胜率: %{y:.1f}%<br>交易次数: %{customdata}次<extra></extra>',
+                            customdata=resonance_stats_df['交易次数']
+                        ))
                         
-                        ax.axhline(y=50, color='red', linestyle='--', linewidth=1, alpha=0.5, label='50%基准线')
-                        ax.set_ylabel('胜率 (%)', fontproperties=font_prop, fontsize=12)
-                        ax.set_title('共振 vs 非共振 胜率对比', fontproperties=font_prop, fontsize=14, fontweight='bold')
-                        ax.set_ylim(0, max(100, resonance_stats_df['胜率(%)'].max() * 1.2))
-                        ax.legend(prop=font_prop)
-                        ax.grid(True, alpha=0.3, axis='y')
+                        # 添加50%基准线
+                        fig.add_hline(y=50, line_dash="dash", line_color="red", 
+                                     annotation_text="50%基准线", 
+                                     annotation_position="right",
+                                     opacity=0.5)
                         
-                        st.pyplot(fig)
-                        plt.close()
+                        # 设置布局
+                        fig.update_layout(
+                            title={
+                                'text': '共振 vs 非共振 胜率对比',
+                                'x': 0.5,
+                                'xanchor': 'center',
+                                'font': {'size': 14, 'color': 'black'}
+                            },
+                            xaxis_title='类型',
+                            yaxis_title='胜率 (%)',
+                            yaxis=dict(range=[0, max(100, resonance_stats_df['胜率(%)'].max() * 1.2)]),
+                            height=400,
+                            template='plotly_white',
+                            showlegend=False
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("暂无共振数据")
                 
@@ -1098,28 +1154,50 @@ if 'results' in st.session_state:
                     resonance_pnl_stats = resonance_pnl_stats.sort_values('类型', ascending=False)  # 共振在前
                     
                     if len(resonance_pnl_stats) > 0:
-                        fig, ax = plt.subplots(figsize=(8, 6))
+                        # 使用Plotly绘制图表（完美支持中文）
+                        fig = go.Figure()
+                        
+                        # 设置颜色
                         colors_list = ['#28a745' if x > 0 else '#ffc107' for x in resonance_pnl_stats['平均盈亏(元)']]
-                        bars = ax.bar(resonance_pnl_stats['类型'], resonance_pnl_stats['平均盈亏(元)'], 
-                                     color=colors_list, alpha=0.7, edgecolor='black', linewidth=2)
                         
-                        # 添加数值标签
-                        for i, bar in enumerate(bars):
-                            height = bar.get_height()
-                            count = resonance_pnl_stats.iloc[i]['交易次数']
-                            ax.text(bar.get_x() + bar.get_width()/2., height,
-                                   f'{height:,.0f}元\n({count}次)',
-                                   ha='center', va='bottom' if height > 0 else 'top', 
-                                   fontsize=11, fontweight='bold',
-                                   fontproperties=font_prop)
+                        # 添加柱状图
+                        fig.add_trace(go.Bar(
+                            x=resonance_pnl_stats['类型'],
+                            y=resonance_pnl_stats['平均盈亏(元)'],
+                            marker_color=colors_list,
+                            marker_line_color='black',
+                            marker_line_width=2,
+                            text=[f'{row["平均盈亏(元)"]:,.0f}元<br>({row["交易次数"]}次)' 
+                                  for _, row in resonance_pnl_stats.iterrows()],
+                            textposition='outside',
+                            textfont=dict(size=11, color='black', family='Arial'),
+                            hovertemplate='类型: %{x}<br>平均盈亏: %{y:,.0f}元<br>交易次数: %{customdata}次<extra></extra>',
+                            customdata=resonance_pnl_stats['交易次数']
+                        ))
                         
-                        ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
-                        ax.set_ylabel('平均盈亏 (元)', fontproperties=font_prop, fontsize=12)
-                        ax.set_title('共振 vs 非共振 平均收益对比', fontproperties=font_prop, fontsize=14, fontweight='bold')
-                        ax.grid(True, alpha=0.3, axis='y')
+                        # 添加0基准线
+                        fig.add_hline(y=0, line_color="black", line_width=1)
                         
-                        st.pyplot(fig)
-                        plt.close()
+                        # 设置布局
+                        fig.update_layout(
+                            title={
+                                'text': '共振 vs 非共振 平均收益对比',
+                                'x': 0.5,
+                                'xanchor': 'center',
+                                'font': {'size': 14, 'color': 'black'}
+                            },
+                            xaxis_title='类型',
+                            yaxis_title='平均盈亏 (元)',
+                            height=400,
+                            template='plotly_white',
+                            showlegend=False,
+                            yaxis=dict(
+                                showgrid=True,
+                                gridcolor='rgba(128, 128, 128, 0.3)'
+                            )
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("暂无共振数据")
     
