@@ -31,8 +31,25 @@ class StrategyConfig:
     
     # ========== 交易执行参数 ==========
     INITIAL_CAPITAL = 1000000  # 初始资金（元）
-    POSITION_SIZE = 0.1  # 仓位比例（0-1之间）
+    POSITION_SIZE = 0.1  # 仓位比例（0-1之间，用于计算投入资金）
+    MAX_POSITION_RATIO = 0.8  # 最大仓位比例（最多使用多少比例的资金作为保证金）
     HOLDING_PERIOD = 15  # 固定持仓周期（交易日）
+    
+    # ========== 期货交易参数 ==========
+    LEVERAGE = 1.0  # 杠杆倍数（1.0表示无杠杆，10.0表示10倍杠杆）
+    COMMISSION_RATE = 0.0001  # 手续费率（按合约价值的比例，如0.0001表示万分之一，如果使用固定手续费则此参数无效）
+    COMMISSION_PER_CONTRACT = 3.3  # 固定手续费（元/手），PTA期货通常为3.3元/手
+    USE_FIXED_COMMISSION = True  # 是否使用固定手续费（True=固定金额/手，False=按合约价值比例）
+    CONTRACT_SIZE = 5  # 合约单位（PTA期货1手=5吨）
+    MIN_MARGIN_RATE = 0.07  # 最低保证金比例（7%，即杠杆最高约14.3倍）
+    
+    @staticmethod
+    def validate_leverage(leverage: float) -> tuple[bool, str]:
+        """验证杠杆倍数是否符合最低保证金要求"""
+        max_leverage = 1.0 / StrategyConfig.MIN_MARGIN_RATE  # 约14.3倍
+        if leverage > max_leverage:
+            return False, f"杠杆倍数不能超过{max_leverage:.1f}倍（最低保证金比例{StrategyConfig.MIN_MARGIN_RATE*100:.0f}%）"
+        return True, ""
     
     # ========== 风险控制参数 ==========
     ATR_MULTIPLIER = 1.5  # 价格ATR止损倍数
@@ -244,21 +261,39 @@ def generate_signals(df: pd.DataFrame,
 
 def backtest_strategy(df: pd.DataFrame, 
                                 initial_capital: float = None,
-                                position_size: float = None, 
+                                position_size: float = None,
+                                max_position_ratio: float = None,
                                 holding_period: int = None,
                                 atr_multiplier: float = None, 
-                                basis_take_profit_threshold: float = None) -> dict:
-    """回测策略"""
+                                basis_take_profit_threshold: float = None,
+                                leverage: float = None,
+                                commission_rate: float = None,
+                                commission_per_contract: float = None,
+                                use_fixed_commission: bool = None,
+                                contract_size: int = None) -> dict:
+    """回测策略（支持期货杠杆和手续费，根据资金量动态计算手数）"""
     if initial_capital is None:
         initial_capital = CONFIG.INITIAL_CAPITAL
     if position_size is None:
         position_size = CONFIG.POSITION_SIZE
+    if max_position_ratio is None:
+        max_position_ratio = CONFIG.MAX_POSITION_RATIO
     if holding_period is None:
         holding_period = CONFIG.HOLDING_PERIOD
     if atr_multiplier is None:
         atr_multiplier = CONFIG.ATR_MULTIPLIER
     if basis_take_profit_threshold is None:
         basis_take_profit_threshold = CONFIG.BASIS_TAKE_PROFIT_THRESHOLD
+    if leverage is None:
+        leverage = CONFIG.LEVERAGE
+    if commission_rate is None:
+        commission_rate = CONFIG.COMMISSION_RATE
+    if commission_per_contract is None:
+        commission_per_contract = CONFIG.COMMISSION_PER_CONTRACT
+    if use_fixed_commission is None:
+        use_fixed_commission = CONFIG.USE_FIXED_COMMISSION
+    if contract_size is None:
+        contract_size = CONFIG.CONTRACT_SIZE
     
     df = df.copy()
     df = df.sort_values("date").reset_index(drop=True)
@@ -287,10 +322,25 @@ def backtest_strategy(df: pd.DataFrame,
         if current_position is not None:
             holding_days = (current_date - current_position["entry_date"]).days
             
+            # 使用保存的手数和保证金（开仓时已计算）
+            contracts = current_position.get("contracts", 0)
+            invested_margin = current_position.get("invested_margin", 0)
+            entry_price = current_position["entry_price"]
+            
+            if contracts <= 0 or invested_margin <= 0:
+                # 如果手数或保证金无效，强制平仓
+                current_position = None
+                continue
+            
             if current_position["type"] == "long":
-                pnl_pct = (current_price / current_position["entry_price"] - 1.0) * 100
+                price_change = current_price - entry_price
             else:
-                pnl_pct = (current_position["entry_price"] / current_price - 1.0) * 100
+                price_change = entry_price - current_price
+            
+            # 计算价格变动带来的盈亏（不考虑手续费，用于判断）
+            pnl_from_price = price_change * contracts * contract_size
+            # 盈亏百分比（相对于投入的保证金）
+            pnl_pct = (pnl_from_price / invested_margin) * 100 if invested_margin > 0 else 0
             
             if not pd.isna(current_basis):
                 if "basis_history" not in current_position:
@@ -348,39 +398,50 @@ def backtest_strategy(df: pd.DataFrame,
                             stop_loss_triggered = True
                             stop_loss_reason = "基差止盈"
             
-            if holding_days >= holding_period:
-                # 使用实际仓位（可能因分级仓位而调整）
-                actual_position_size = current_position.get("actual_position_size", position_size)
-                pnl = capital * actual_position_size * (pnl_pct / 100)
+            if holding_days >= holding_period or stop_loss_triggered:
+                # 使用上面已经计算好的变量
+                # actual_position_size, invested_capital, contracts, entry_price, price_change 等已在上面计算
+                
+                # 盈亏 = 价格变动 × 合约数量 × 合约单位
+                # 注意：这里不需要再乘以leverage，因为合约数量已经通过leverage计算得出
+                pnl_from_price = price_change * contracts * contract_size
+                
+                # 计算手续费（开仓+平仓）
+                if use_fixed_commission:
+                    # 固定手续费：每手固定金额（开仓+平仓各收一次）
+                    total_commission = commission_per_contract * contracts * 2  # 开仓和平仓各收一次
+                else:
+                    # 比例手续费：按合约价值的一定比例
+                    entry_contract_value = entry_price * contracts * contract_size
+                    exit_contract_value = current_price * contracts * contract_size
+                    entry_commission = entry_contract_value * commission_rate
+                    exit_commission = exit_contract_value * commission_rate
+                    total_commission = entry_commission + exit_commission
+                
+                # 最终盈亏 = 价格变动盈亏 - 手续费
+                pnl = pnl_from_price - total_commission
+                
+                # 更新资金
                 capital += pnl
+                
+                # 计算盈亏百分比（相对于投入的保证金）
+                pnl_pct = (pnl / invested_margin) * 100 if invested_margin > 0 else 0
+                
+                exit_reason = "固定持仓周期" if holding_days >= holding_period else stop_loss_reason
+                
                 trades.append({
                     "entry_date": current_position["entry_date"],
                     "exit_date": current_date,
                     "type": current_position["type"],
-                    "entry_price": current_position["entry_price"],
+                    "entry_price": entry_price,
                     "exit_price": current_price,
                     "pnl": pnl,
                     "pnl_pct": pnl_pct,
                     "holding_days": holding_days,
-                    "exit_reason": "固定持仓周期"
-                })
-                current_position = None
-            
-            elif stop_loss_triggered:
-                # 使用实际仓位（可能因分级仓位而调整）
-                actual_position_size = current_position.get("actual_position_size", position_size)
-                pnl = capital * actual_position_size * (pnl_pct / 100)
-                capital += pnl
-                trades.append({
-                    "entry_date": current_position["entry_date"],
-                    "exit_date": current_date,
-                    "type": current_position["type"],
-                    "entry_price": current_position["entry_price"],
-                    "exit_price": current_price,
-                    "pnl": pnl,
-                    "pnl_pct": pnl_pct,
-                    "holding_days": holding_days,
-                    "exit_reason": stop_loss_reason
+                    "exit_reason": exit_reason,
+                    "contracts": contracts,
+                    "commission": total_commission,
+                    "leverage": leverage
                 })
                 current_position = None
         
@@ -390,13 +451,37 @@ def backtest_strategy(df: pd.DataFrame,
                 entry_px = current_px
                 stop_loss_price = entry_price - atr_multiplier * current_atr
                 
-                # 分级仓位：根据PTA生产利润调整仓位
-                actual_position_size = position_size
+                # 根据当前资金量计算最多能开多少手
+                # 1. 计算可用保证金（最多使用max_position_ratio比例的资金）
+                available_margin = capital * max_position_ratio
+                
+                # 2. 分级仓位：根据PTA生产利润调整仓位比例
+                actual_position_ratio = position_size
                 if CONFIG.ENABLE_DYNAMIC_POSITION and not pd.isna(current_margin):
                     if current_margin < CONFIG.MARGIN_LOW_THRESHOLD:
-                        actual_position_size = position_size * CONFIG.POSITION_MULTIPLIER_LOW
+                        actual_position_ratio = min(position_size * CONFIG.POSITION_MULTIPLIER_LOW, max_position_ratio)
                     elif current_margin > CONFIG.MARGIN_HIGH_THRESHOLD:
-                        actual_position_size = position_size * CONFIG.POSITION_MULTIPLIER_HIGH
+                        actual_position_ratio = max(position_size * CONFIG.POSITION_MULTIPLIER_HIGH, 0.01)  # 至少1%
+                
+                # 确保不超过最大仓位比例
+                actual_position_ratio = min(actual_position_ratio, max_position_ratio)
+                
+                # 3. 实际投入的保证金
+                invested_margin = available_margin * actual_position_ratio
+                
+                # 4. 根据保证金和杠杆倍数计算能控制的合约价值
+                contract_value = invested_margin * leverage
+                
+                # 5. 计算能开的手数（向下取整）
+                contracts = int(contract_value / (entry_price * contract_size))
+                
+                # 6. 如果手数为0，说明资金不足，跳过本次开仓
+                if contracts <= 0:
+                    continue
+                
+                # 7. 重新计算实际使用的保证金（基于实际手数）
+                actual_contract_value = contracts * entry_price * contract_size
+                actual_invested_margin = actual_contract_value / leverage
                 
                 current_position = {
                     "type": "long",
@@ -404,32 +489,65 @@ def backtest_strategy(df: pd.DataFrame,
                     "entry_price": entry_price,
                     "entry_px": entry_px,
                     "stop_loss": stop_loss_price,
-                    "actual_position_size": actual_position_size,
+                    "contracts": contracts,  # 保存实际开仓手数
+                    "invested_margin": actual_invested_margin,  # 保存实际投入的保证金
                     "basis_history": [current_basis] if not pd.isna(current_basis) else []
                 }
             elif i > 0 and df.loc[i-1, "short_signal"]:
                 entry_price = current_price
                 entry_px = current_px
                 stop_loss_price = entry_price + atr_multiplier * current_atr
+                
+                # 根据当前资金量计算最多能开多少手（做空逻辑相同）
+                available_margin = capital * max_position_ratio
+                actual_position_ratio = position_size
+                if CONFIG.ENABLE_DYNAMIC_POSITION and not pd.isna(current_margin):
+                    if current_margin < CONFIG.MARGIN_LOW_THRESHOLD:
+                        actual_position_ratio = min(position_size * CONFIG.POSITION_MULTIPLIER_LOW, max_position_ratio)
+                    elif current_margin > CONFIG.MARGIN_HIGH_THRESHOLD:
+                        actual_position_ratio = max(position_size * CONFIG.POSITION_MULTIPLIER_HIGH, 0.01)  # 至少1%
+                
+                # 确保不超过最大仓位比例
+                actual_position_ratio = min(actual_position_ratio, max_position_ratio)
+                
+                invested_margin = available_margin * actual_position_ratio
+                contract_value = invested_margin * leverage
+                contracts = int(contract_value / (entry_price * contract_size))
+                
+                if contracts <= 0:
+                    continue
+                
+                actual_contract_value = contracts * entry_price * contract_size
+                actual_invested_margin = actual_contract_value / leverage
+                
                 current_position = {
                     "type": "short",
                     "entry_date": current_date,
                     "entry_price": entry_price,
                     "entry_px": entry_px,
                     "stop_loss": stop_loss_price,
+                    "contracts": contracts,
+                    "invested_margin": actual_invested_margin,
                     "basis_history": [current_basis] if not pd.isna(current_basis) else []
                 }
         
         if current_position is not None:
-            if current_position["type"] == "long":
-                unrealized_pnl_pct = (current_price / current_position["entry_price"] - 1.0) * 100
-            else:
-                unrealized_pnl_pct = (current_position["entry_price"] / current_price - 1.0) * 100
+            # 计算未实现盈亏（使用保存的手数和保证金）
+            contracts = current_position.get("contracts", 0)
+            entry_price = current_position["entry_price"]
             
-            # 更新实际仓位（用于计算未实现盈亏）
-            actual_position_size = current_position.get("actual_position_size", position_size)
-            unrealized_pnl = capital * position_size * (unrealized_pnl_pct / 100)
-            equity = capital + unrealized_pnl
+            if contracts > 0:
+                if current_position["type"] == "long":
+                    price_change = current_price - entry_price
+                else:
+                    price_change = entry_price - current_price
+                
+                unrealized_pnl_from_price = price_change * contracts * contract_size
+                # 未实现盈亏暂不考虑手续费（平仓时才扣除）
+                unrealized_pnl = unrealized_pnl_from_price
+                equity = capital + unrealized_pnl
+            else:
+                equity = capital
         else:
             equity = capital
         
@@ -439,24 +557,53 @@ def backtest_strategy(df: pd.DataFrame,
         last_price = df.iloc[-1]["futures_price"]
         last_date = df.iloc[-1]["date"]
         holding_days = (last_date - current_position["entry_date"]).days
-        if current_position["type"] == "long":
-            pnl_pct = (last_price / current_position["entry_price"] - 1.0) * 100
+        
+        # 使用保存的手数和保证金
+        contracts = current_position.get("contracts", 0)
+        invested_margin = current_position.get("invested_margin", 0)
+        entry_price = current_position["entry_price"]
+        
+        if contracts <= 0 or invested_margin <= 0:
+            # 如果手数或保证金无效，跳过
+            pass
         else:
-            pnl_pct = (current_position["entry_price"] / last_price - 1.0) * 100
-        actual_position_size = current_position.get("actual_position_size", position_size)
-        pnl = capital * actual_position_size * (pnl_pct / 100)
-        capital += pnl
-        trades.append({
-            "entry_date": current_position["entry_date"],
-            "exit_date": last_date,
-            "type": current_position["type"],
-            "entry_price": current_position["entry_price"],
-            "exit_price": last_price,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "holding_days": holding_days,
-            "exit_reason": "回测结束强制平仓"
-        })
+            if current_position["type"] == "long":
+                price_change = last_price - entry_price
+            else:
+                price_change = entry_price - last_price
+            
+            pnl_from_price = price_change * contracts * contract_size
+            
+            # 计算手续费（开仓+平仓）
+            if use_fixed_commission:
+                # 固定手续费：每手固定金额（开仓+平仓各收一次）
+                total_commission = commission_per_contract * contracts * 2  # 开仓和平仓各收一次
+            else:
+                # 比例手续费：按合约价值的一定比例
+                entry_contract_value = entry_price * contracts * contract_size
+                exit_contract_value = last_price * contracts * contract_size
+                entry_commission = entry_contract_value * commission_rate
+                exit_commission = exit_contract_value * commission_rate
+                total_commission = entry_commission + exit_commission
+            
+            pnl = pnl_from_price - total_commission
+            capital += pnl
+            pnl_pct = (pnl / invested_margin) * 100 if invested_margin > 0 else 0
+            
+            trades.append({
+                "entry_date": current_position["entry_date"],
+                "exit_date": last_date,
+                "type": current_position["type"],
+                "entry_price": entry_price,
+                "exit_price": last_price,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "holding_days": holding_days,
+                "exit_reason": "回测结束强制平仓",
+                "contracts": contracts,
+                "commission": total_commission,
+                "leverage": leverage
+            })
     
     equity_series = pd.Series(equity_curve)
     total_return = (equity_series.iloc[-1] / equity_series.iloc[0] - 1.0) * 100

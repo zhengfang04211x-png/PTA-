@@ -429,16 +429,29 @@ with st.sidebar.expander("🛡️ 安全垫过滤器", expanded=False):
 
 # 交易执行参数（expander，默认折叠）
 with st.sidebar.expander("💼 交易执行参数", expanded=False):
-    position_size = st.slider(
-        "每次投入资金比例（%）",
-        min_value=1,
+    st.markdown("#### 💰 资金管理")
+    
+    max_position_ratio = st.slider(
+        "最大仓位比例（%）",
+        min_value=10,
         max_value=100,
+        value=int(CONFIG.MAX_POSITION_RATIO * 100),
+        step=5,
+        help="最多使用多少比例的资金作为保证金（建议80%，留20%作为风险缓冲）",
+        key="max_position_ratio"
+    ) / 100
+    st.caption("💡 建议80%，留20%作为风险缓冲")
+    
+    position_size = st.slider(
+        "每次投入比例（%）",
+        min_value=1,
+        max_value=int(max_position_ratio * 100),
         value=int(CONFIG.POSITION_SIZE * 100),
         step=1,
-        help="每次交易投入多少比例的资金",
+        help=f"在最大仓位比例内，每次交易投入多少比例的资金（最多{int(max_position_ratio*100)}%）",
         key="position_size"
     ) / 100
-    st.caption("💡 建议10-20%")
+    st.caption(f"💡 建议10-20%，不超过最大仓位比例{int(max_position_ratio*100)}%")
     
     enable_dynamic_position = st.checkbox(
         "启用分级仓位（根据加工费自动调整）",
@@ -448,6 +461,9 @@ with st.sidebar.expander("💼 交易执行参数", expanded=False):
     if enable_dynamic_position:
         st.caption("💡 加工费<350：仓位×1.5；加工费>600：仓位×0.5")
     
+    st.markdown("---")
+    st.markdown("#### ⏱️ 持仓周期")
+    
     holding_period = st.slider(
         "持仓天数",
         min_value=5,
@@ -456,6 +472,88 @@ with st.sidebar.expander("💼 交易执行参数", expanded=False):
         step=1,
         key="holding_period"
     )
+    
+    st.markdown("---")
+    st.markdown("#### 📊 期货交易参数")
+    
+    # 计算最大杠杆倍数（基于最低保证金比例）
+    max_leverage = 1.0 / CONFIG.MIN_MARGIN_RATE  # 约14.3倍
+    
+    leverage = st.slider(
+        "杠杆倍数",
+        min_value=1.0,
+        max_value=float(max_leverage),
+        value=CONFIG.LEVERAGE,
+        step=0.5,
+        help=f"期货交易的杠杆倍数（1.0表示无杠杆，最高{max_leverage:.1f}倍，对应最低保证金比例{CONFIG.MIN_MARGIN_RATE*100:.0f}%）",
+        key="leverage"
+    )
+    st.caption(f"💡 PTA期货最低保证金{CONFIG.MIN_MARGIN_RATE*100:.0f}%，最高杠杆{max_leverage:.1f}倍")
+    
+    # 显示实际保证金比例
+    actual_margin_rate = 1.0 / leverage if leverage > 0 else 1.0
+    if actual_margin_rate < CONFIG.MIN_MARGIN_RATE:
+        st.warning(f"⚠️ 当前杠杆{leverage:.1f}倍对应保证金比例{actual_margin_rate*100:.2f}%，低于最低要求{CONFIG.MIN_MARGIN_RATE*100:.0f}%")
+    else:
+        st.info(f"✅ 当前杠杆{leverage:.1f}倍对应保证金比例{actual_margin_rate*100:.2f}%")
+    
+    # 显示实际能开的手数估算（基于当前资金和杠杆）
+    if 'initial_capital' in st.session_state:
+        current_capital = st.session_state.get('initial_capital', initial_capital)
+    else:
+        current_capital = initial_capital
+    
+    # 估算能开的手数（假设价格为6000元/吨）
+    estimated_price = 6000
+    available_margin = current_capital * max_position_ratio
+    actual_invested = available_margin * position_size
+    estimated_contract_value = actual_invested * leverage
+    estimated_contracts = int(estimated_contract_value / (estimated_price * 5))
+    
+    if estimated_contracts > 0:
+        st.info(f"📊 估算：当前资金{current_capital:,.0f}元，最多可开约{estimated_contracts}手（假设价格{estimated_price}元/吨，杠杆{leverage}倍）")
+    
+    # 手续费计算方式选择
+    use_fixed_commission = st.checkbox(
+        "使用固定手续费（推荐）",
+        value=CONFIG.USE_FIXED_COMMISSION,
+        help="PTA期货通常使用固定手续费，每手固定金额",
+        key="use_fixed_commission"
+    )
+    
+    if use_fixed_commission:
+        # 固定手续费（每手固定金额）
+        commission_per_contract = st.number_input(
+            "固定手续费（元/手）",
+            min_value=0.0,
+            max_value=10.0,
+            value=CONFIG.COMMISSION_PER_CONTRACT,
+            step=0.1,
+            format="%.1f",
+            help="每手合约的固定手续费（开仓+平仓各收一次，共2次）",
+            key="commission_per_contract"
+        )
+        st.caption(f"💡 PTA期货通常为3.3元/手（开仓+平仓共{commission_per_contract*2:.1f}元）")
+        commission_rate = 0.0  # 不使用比例手续费
+    else:
+        # 比例手续费（按合约价值）
+        commission_rate = st.number_input(
+            "手续费率（按合约价值）",
+            min_value=0.0,
+            max_value=0.01,
+            value=CONFIG.COMMISSION_RATE,
+            step=0.0001,
+            format="%.4f",
+            help="手续费占合约价值的比例（如0.0001表示万分之一）",
+            key="commission_rate"
+        )
+        st.caption("💡 通常为0.0001-0.0003（万分之一到万分之三）")
+        commission_per_contract = 0.0  # 不使用固定手续费
+    
+    # PTA期货合约单位固定为5吨/手
+    contract_size = 5
+    st.markdown(f"**合约单位：** {contract_size} 吨/手（PTA期货固定）")
+    st.caption("💡 PTA期货1手=5吨，不可调整")
     st.caption("💡 建议15-18天")
 
 # 风险控制参数（expander，默认折叠）
@@ -563,6 +661,7 @@ if run_backtest:
             CONFIG.MARGIN_SHORT_THRESHOLD = margin_short
             CONFIG.INITIAL_CAPITAL = initial_capital
             CONFIG.POSITION_SIZE = position_size
+            CONFIG.MAX_POSITION_RATIO = max_position_ratio
             CONFIG.HOLDING_PERIOD = holding_period
             CONFIG.ATR_MULTIPLIER = atr_multiplier
             CONFIG.ATR_PERIOD = atr_period
@@ -573,6 +672,17 @@ if run_backtest:
             CONFIG.BASIS_DECLINE_DAYS = basis_decline_days
             CONFIG.BASIS_MIN_HOLDING_DAYS = basis_min_holding
             CONFIG.ENABLE_DYNAMIC_POSITION = enable_dynamic_position
+            CONFIG.LEVERAGE = leverage
+            CONFIG.COMMISSION_RATE = commission_rate
+            CONFIG.COMMISSION_PER_CONTRACT = commission_per_contract
+            CONFIG.USE_FIXED_COMMISSION = use_fixed_commission
+            CONFIG.CONTRACT_SIZE = 5  # PTA期货固定为5吨/手
+            
+            # 验证杠杆倍数是否符合最低保证金要求
+            max_leverage = 1.0 / CONFIG.MIN_MARGIN_RATE
+            if leverage > max_leverage:
+                st.error(f"❌ 杠杆倍数{leverage:.1f}倍超过最大允许值{max_leverage:.1f}倍（最低保证金比例{CONFIG.MIN_MARGIN_RATE*100:.0f}%）")
+                st.stop()
             
             # 加载数据
             df = load_merged_data_with_basis(data_path)
@@ -615,14 +725,20 @@ if run_backtest:
                 margin_short_threshold=margin_short
             )
             
-            # 回测策略
+            # 回测策略（包含杠杆和手续费，根据资金量动态计算手数）
             results = backtest_strategy(
                 df_signals,
                 initial_capital=initial_capital,
                 position_size=position_size,
+                max_position_ratio=max_position_ratio,
                 holding_period=holding_period,
                 atr_multiplier=atr_multiplier,
-                basis_take_profit_threshold=basis_tp_threshold
+                basis_take_profit_threshold=basis_tp_threshold,
+                leverage=leverage,
+                commission_rate=commission_rate,
+                commission_per_contract=commission_per_contract,
+                use_fixed_commission=use_fixed_commission,
+                contract_size=5  # PTA期货固定为5吨/手
             )
             
             # 保存结果到session state
@@ -1065,11 +1181,50 @@ if 'results' in st.session_state:
         
         with col1:
             # 交易明细表（条件格式）
-            display_cols = ["entry_date", "exit_date", "type", "entry_price", "exit_price", 
-                           "pnl", "pnl_pct", "holding_days", "exit_reason"]
+            # 检查是否有手数和手续费字段（新版本才有）
+            available_cols = trades_df.columns.tolist()
+            display_cols = ["entry_date", "exit_date", "type", "entry_price", "exit_price"]
+            
+            # 添加手数（如果存在）
+            if "contracts" in available_cols:
+                display_cols.append("contracts")
+            
+            display_cols.extend(["pnl", "pnl_pct", "holding_days"])
+            
+            # 添加手续费（如果存在）
+            if "commission" in available_cols:
+                display_cols.append("commission")
+            
+            display_cols.append("exit_reason")
+            
             display_df = trades_df[display_cols].copy()
-            display_df.columns = ["入场日期", "出场日期", "类型", "入场价", "出场价", 
-                                  "盈亏(元)", "收益率(%)", "持仓天数", "平仓原因"]
+            
+            # 构建列名映射
+            col_names = ["入场日期", "出场日期", "类型", "入场价", "出场价"]
+            if "contracts" in display_cols:
+                col_names.append("手数")
+            col_names.extend(["盈亏(元)", "收益率(%)", "持仓天数"])
+            if "commission" in display_cols:
+                col_names.append("手续费(元)")
+            col_names.append("平仓原因")
+            
+            display_df.columns = col_names
+            
+            # 格式化手数（显示为整数）
+            if "手数" in display_df.columns:
+                def format_contracts(x):
+                    try:
+                        if pd.notna(x):
+                            val = float(x)
+                            return int(val) if val > 0 else 0
+                        return 0
+                    except:
+                        return 0
+                display_df["手数"] = display_df["手数"].apply(format_contracts)
+            
+            # 格式化手续费（保留2位小数）
+            if "手续费(元)" in display_df.columns:
+                display_df["手续费(元)"] = display_df["手续费(元)"].apply(lambda x: f"{float(x):.2f}" if pd.notna(x) else "0.00")
             
             # 替换平仓原因
             display_df["平仓原因"] = display_df["平仓原因"].map(exit_reasons_map).fillna(display_df["平仓原因"])
