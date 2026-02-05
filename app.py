@@ -404,8 +404,9 @@ if run_backtest:
             st.session_state['df'] = df
             st.session_state['df_signals'] = df_signals
             st.session_state['results'] = results
-            st.session_state['px_atr_multiplier'] = px_atr_multiplier
-            st.session_state['initial_capital'] = initial_capital
+            # 使用不同的key名称保存回测时使用的参数值，避免与widget的key冲突
+            st.session_state['backtest_px_atr_multiplier'] = px_atr_multiplier
+            st.session_state['backtest_initial_capital'] = initial_capital
             
             st.success("✅ 回测完成！")
             st.rerun()
@@ -422,16 +423,18 @@ if 'results' in st.session_state:
     results = st.session_state['results']
     df_signals = st.session_state['df_signals']
     
-    # 从session state获取参数（如果存在）
-    if 'px_atr_multiplier' in st.session_state:
-        px_atr_multiplier = st.session_state['px_atr_multiplier']
+    # 从session state获取回测时使用的参数值（如果存在）
+    if 'backtest_px_atr_multiplier' in st.session_state:
+        px_atr_multiplier = st.session_state['backtest_px_atr_multiplier']
     else:
-        px_atr_multiplier = CONFIG.PX_ATR_MULTIPLIER
+        # 如果不存在，尝试从widget读取（回测后widget的值可能已被用户修改）
+        px_atr_multiplier = st.session_state.get('px_atr_multiplier', CONFIG.PX_ATR_MULTIPLIER)
     
-    if 'initial_capital' in st.session_state:
-        initial_capital = st.session_state['initial_capital']
+    if 'backtest_initial_capital' in st.session_state:
+        initial_capital = st.session_state['backtest_initial_capital']
     else:
-        initial_capital = CONFIG.INITIAL_CAPITAL
+        # 如果不存在，尝试从widget读取
+        initial_capital = st.session_state.get('initial_capital', CONFIG.INITIAL_CAPITAL)
     
     # ========== 顶部摘要栏：4个关键指标 ==========
     st.markdown("---")
