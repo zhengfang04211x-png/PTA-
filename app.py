@@ -590,7 +590,7 @@ if 'results' in st.session_state:
     if len(results['交易记录']) > 0:
         st.markdown("---")
         st.markdown("## 🎯 逻辑共振分布图")
-        st.markdown("**为什么我们要等共振？** 当"低加工费 + PX强信号"同时出现时，胜率显著提升")
+        st.markdown('**为什么我们要等共振？** 当"低加工费 + PX强信号"同时出现时，胜率显著提升')
         
         # 分析共振情况
         trades_df = pd.DataFrame(results['交易记录'])
