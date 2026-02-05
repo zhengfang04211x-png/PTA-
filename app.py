@@ -18,6 +18,126 @@ from pathlib import Path
 import warnings
 import sys
 from datetime import datetime, timedelta
+from matplotlib import font_manager
+import matplotlib
+import urllib.request
+import os
+import tempfile
+
+# 配置matplotlib中文字体（兼容Streamlit Cloud）
+def download_chinese_font():
+    """下载中文字体文件到临时目录（用于Streamlit Cloud）"""
+    # 使用 Noto Sans CJK SC 字体（Google开源中文字体）
+    # 使用 GitHub 上的 TTF 字体文件（更可靠）
+    font_url = "https://github.com/google/fonts/raw/main/ofl/notosanscjksc/NotoSansCJKsc-Regular.otf"
+    
+    # 如果URL是OTF格式，尝试转换为TTF或直接使用
+    # 实际上，matplotlib支持OTF格式，所以可以直接使用
+    font_name = "NotoSansCJKsc-Regular.otf"
+    
+    # 获取matplotlib字体目录
+    try:
+        # 尝试使用matplotlib的字体缓存目录
+        cache_dir = font_manager.get_cachedir()
+        font_dir = Path(cache_dir).parent / "fonts" / "ttf"
+    except:
+        # 如果失败，使用临时目录
+        font_dir = Path(tempfile.gettempdir()) / "matplotlib_fonts"
+    
+    font_dir.mkdir(parents=True, exist_ok=True)
+    font_path = font_dir / font_name
+    
+    # 如果字体文件已存在，直接返回
+    if font_path.exists() and font_path.stat().st_size > 0:
+        return str(font_path)
+    
+    # 尝试下载字体文件
+    try:
+        # 设置超时时间（10秒）
+        with urllib.request.urlopen(font_url, timeout=10) as response:
+            with open(font_path, 'wb') as f:
+                f.write(response.read())
+        
+        # 验证文件是否下载成功
+        if font_path.exists() and font_path.stat().st_size > 1000:  # 至少1KB
+            # 清除matplotlib字体缓存，强制重新加载
+            try:
+                # 将字体文件添加到matplotlib的字体路径
+                font_manager.fontManager.addfont(str(font_path))
+                font_manager._rebuild()
+            except:
+                pass
+            return str(font_path)
+    except Exception as e:
+        # 下载失败，返回None
+        return None
+    
+    return None
+
+def setup_chinese_font():
+    """配置matplotlib中文字体，兼容Streamlit Cloud环境"""
+    # 尝试使用系统中文字体（按优先级排序）
+    chinese_fonts = [
+        "Microsoft YaHei", "Microsoft YaHei UI", 
+        "SimHei", "SimSun", "KaiTi", "FangSong",
+        "WenQuanYi Micro Hei", "WenQuanYi Zen Hei",
+        "Noto Sans CJK SC", "Noto Sans CJK TC",
+        "Source Han Sans CN", "Source Han Sans SC",
+        "STHeiti", "STSong", "STKaiti", "STFangsong"
+    ]
+    
+    # 获取所有可用字体
+    try:
+        available_fonts = [f.name for f in font_manager.fontManager.ttflist]
+    except:
+        available_fonts = []
+    
+    # 查找可用的中文字体
+    for font in chinese_fonts:
+        if font in available_fonts:
+            try:
+                plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+                plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+                # 清除matplotlib字体缓存，强制重新加载
+                try:
+                    font_manager._rebuild()
+                except:
+                    pass
+                return font_manager.FontProperties(family=font)
+            except Exception as e:
+                continue
+    
+    # 如果找不到中文字体，尝试下载字体文件（用于Streamlit Cloud）
+    downloaded_font_path = download_chinese_font()
+    if downloaded_font_path:
+        try:
+            # 使用下载的字体文件
+            font_prop = font_manager.FontProperties(fname=downloaded_font_path)
+            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + plt.rcParams['font.sans-serif']
+            plt.rcParams['axes.unicode_minus'] = False
+            # 清除matplotlib字体缓存，强制重新加载
+            try:
+                font_manager._rebuild()
+            except:
+                pass
+            return font_prop
+        except Exception as e:
+            pass
+    
+    # 如果都失败，尝试使用系统默认sans-serif字体
+    plt.rcParams['axes.unicode_minus'] = False
+    try:
+        default_font = font_manager.FontProperties()
+        plt.rcParams['font.sans-serif'] = ['sans-serif']
+        return default_font
+    except:
+        # 最后的fallback：使用DejaVu Sans（虽然不支持中文，但至少不会报错）
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        return font_manager.FontProperties(family='DejaVu Sans')
+
+# 初始化字体配置
+_chinese_font_prop = setup_chinese_font()
 
 # 添加当前目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,8 +147,32 @@ from strategy import (
     load_merged_data_with_basis,
     generate_signals,
     backtest_strategy,
-    get_chinese_font_prop
+    get_chinese_font_prop as _get_chinese_font_prop_original
 )
+
+# 重写get_chinese_font_prop函数，优先使用我们配置的字体
+def get_chinese_font_prop():
+    """获取中文字体属性对象（优先使用全局配置的字体）"""
+    if _chinese_font_prop is not None:
+        return _chinese_font_prop
+    # 如果全局配置失败，尝试使用strategy.py中的函数
+    result = _get_chinese_font_prop_original()
+    if result is not None:
+        return result
+    # 如果都失败，尝试使用系统默认字体
+    try:
+        # 使用matplotlib的默认字体配置
+        default_prop = font_manager.FontProperties()
+        # 确保rcParams已正确设置
+        if 'font.sans-serif' not in plt.rcParams or not plt.rcParams['font.sans-serif']:
+            plt.rcParams['font.sans-serif'] = ['sans-serif']
+        plt.rcParams['axes.unicode_minus'] = False
+        return default_prop
+    except:
+        # 最后的fallback：使用DejaVu Sans（虽然不支持中文，但至少不会报错）
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        return font_manager.FontProperties(family='DejaVu Sans')
 
 warnings.filterwarnings("ignore")
 
@@ -828,6 +972,7 @@ if 'results' in st.session_state:
     st.markdown("## 📊 价格走势与交易信号")
     
     fig, ax = plt.subplots(figsize=(16, 6))
+    font_prop = get_chinese_font_prop()  # 确保字体属性已获取
     
     ax.plot(df_signals["date"], df_signals["futures_price"], 
             color="#1f77b4", linewidth=1.5, alpha=0.7, label="PTA期货价格")
