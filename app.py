@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pathlib import Path
 import warnings
 import sys
@@ -638,28 +640,54 @@ if 'results' in st.session_state:
     
     st.markdown("---")
     
-    # ========== 资产净值曲线（增强版） ==========
+    # ========== 资产净值曲线（使用Plotly，完美支持中文） ==========
     st.markdown("## 📈 资产净值曲线")
     
-    fig, ax = plt.subplots(figsize=(16, 8))
-    font_prop = get_chinese_font_prop()
-    
     equity_curve = results['净值曲线']
-    dates = df_signals['date'].tolist() + [df_signals['date'].iloc[-1]]
+    dates = df_signals['date'].tolist()[:len(equity_curve)]
+    
+    # 创建Plotly图表
+    fig = go.Figure()
     
     # 绘制净值曲线
-    ax.plot(dates[:len(equity_curve)], equity_curve.values, 
-            color="#1f77b4", linewidth=3, label="账户净值", zorder=3)
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=equity_curve.values,
+        mode='lines',
+        name='账户净值',
+        line=dict(color='#1f77b4', width=3),
+        hovertemplate='日期: %{x}<br>账户资金: %{y:,.0f} 元<extra></extra>'
+    ))
     
     # 绘制初始资金线
-    ax.axhline(y=equity_curve.iloc[0], color="gray", linestyle="--", 
-               linewidth=2, alpha=0.5, label="初始资金", zorder=1)
+    initial_value = equity_curve.iloc[0]
+    fig.add_trace(go.Scatter(
+        x=[dates[0], dates[-1]],
+        y=[initial_value, initial_value],
+        mode='lines',
+        name='初始资金',
+        line=dict(color='gray', width=2, dash='dash'),
+        hovertemplate='初始资金: %{y:,.0f} 元<extra></extra>'
+    ))
     
     # 计算并绘制回撤阴影区域
     running_max = equity_curve.expanding().max()
     drawdown = equity_curve - running_max
-    ax.fill_between(dates[:len(equity_curve)], equity_curve.values, running_max.values,
-                    where=(drawdown < 0), color='red', alpha=0.2, label='回撤区域', zorder=2)
+    drawdown_dates = dates
+    drawdown_values = equity_curve.values
+    max_values = running_max.values
+    
+    # 创建回撤区域（填充区域）
+    fig.add_trace(go.Scatter(
+        x=drawdown_dates + drawdown_dates[::-1],
+        y=list(drawdown_values) + list(max_values[::-1]),
+        fill='toself',
+        fillcolor='rgba(255, 0, 0, 0.2)',
+        line=dict(color='rgba(255,255,255,0)'),
+        name='回撤区域',
+        hoverinfo='skip',
+        showlegend=True
+    ))
     
     # 标注关键盈利阶段
     if len(results['交易记录']) > 0:
@@ -671,24 +699,35 @@ if 'results' in st.session_state:
         profitable_trades = trades_df[trades_df['pnl'] > 0].sort_values('pnl', ascending=False)
         if len(profitable_trades) > 0:
             top_trade = profitable_trades.iloc[0]
-            entry_idx = df_signals[df_signals['date'] == top_trade['entry_date']].index
-            exit_idx = df_signals[df_signals['date'] == top_trade['exit_date']].index
+            entry_date = top_trade['entry_date']
+            exit_date = top_trade['exit_date']
+            
+            # 找到对应的净值
+            entry_idx = df_signals[df_signals['date'] == entry_date].index
+            exit_idx = df_signals[df_signals['date'] == exit_date].index
             
             if len(entry_idx) > 0 and len(exit_idx) > 0:
-                entry_date = df_signals.loc[entry_idx[0], 'date']
-                exit_date = df_signals.loc[exit_idx[0], 'date']
-                entry_equity = equity_curve.iloc[entry_idx[0]]
                 exit_equity = equity_curve.iloc[exit_idx[0]]
+                annotation_y = exit_equity + (equity_curve.max() - equity_curve.min()) * 0.1
                 
-                # 标注盈利阶段
-                ax.annotate(
-                    f'最大盈利单：{top_trade["pnl"]:,.0f}元\n({entry_date.strftime("%Y-%m")})',
-                    xy=(exit_date, exit_equity),
-                    xytext=(exit_date, exit_equity + (equity_curve.max() - equity_curve.min()) * 0.1),
-                    arrowprops=dict(arrowstyle='->', color='green', lw=2),
-                    fontsize=10,
-                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                    fontproperties=font_prop
+                # 添加标注
+                fig.add_annotation(
+                    x=exit_date,
+                    y=exit_equity,
+                    ax=exit_date,
+                    ay=annotation_y,
+                    xref="x",
+                    yref="y",
+                    text=f'最大盈利单：{top_trade["pnl"]:,.0f}元<br>({entry_date.strftime("%Y-%m")})',
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowsize=1.5,
+                    arrowwidth=2,
+                    arrowcolor='green',
+                    bgcolor='yellow',
+                    bordercolor='black',
+                    borderwidth=1,
+                    font=dict(size=10, color='black')
                 )
     
     # 标注盈利阶段说明
@@ -711,27 +750,61 @@ if 'results' in st.session_state:
                     ]
                     if len(period_trades) > 0 and period_trades['pnl'].sum() > 0:
                         year = date_val.year
-                        ax.annotate(
-                            f'该阶段盈利核心：\n捕捉到了{year}年PX暴涨\n带来的成本传导红利',
-                            xy=(date_val, equity_val),
-                            xytext=(date_val, equity_val + (equity_curve.max() - equity_curve.min()) * 0.15),
-                            arrowprops=dict(arrowstyle='->', color='orange', lw=1.5),
-                            fontsize=9,
-                            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.7),
-                            fontproperties=font_prop,
-                            ha='center'
+                        annotation_y = equity_val + (equity_curve.max() - equity_curve.min()) * 0.15
+                        
+                        fig.add_annotation(
+                            x=date_val,
+                            y=equity_val,
+                            ax=date_val,
+                            ay=annotation_y,
+                            xref="x",
+                            yref="y",
+                            text=f'该阶段盈利核心：<br>捕捉到了{year}年PX暴涨<br>带来的成本传导红利',
+                            showarrow=True,
+                            arrowhead=2,
+                            arrowsize=1,
+                            arrowwidth=1.5,
+                            arrowcolor='orange',
+                            bgcolor='lightblue',
+                            bordercolor='black',
+                            borderwidth=1,
+                            font=dict(size=9, color='black'),
+                            align='center'
                         )
     
-    ax.set_xlabel("日期", fontproperties=font_prop, fontsize=14)
-    ax.set_ylabel("账户资金（元）", fontproperties=font_prop, fontsize=14)
-    ax.set_title("策略资产净值曲线（含回撤阴影）", fontproperties=font_prop, fontsize=16, fontweight="bold")
-    ax.legend(prop=font_prop, fontsize=11, loc='upper left')
-    ax.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
+    # 设置图表布局
+    fig.update_layout(
+        title={
+            'text': '策略资产净值曲线（含回撤阴影）',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 16, 'color': 'black'}
+        },
+        xaxis_title='日期',
+        yaxis_title='账户资金（元）',
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        height=600,
+        template='plotly_white',
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickangle=-45
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickformat=',.0f'
+        )
+    )
     
-    st.pyplot(fig)
-    plt.close()
+    st.plotly_chart(fig, use_container_width=True)
     
     # ========== 逻辑共振分布图 ==========
     if len(results['交易记录']) > 0:
@@ -967,39 +1040,91 @@ if 'results' in st.session_state:
             st.metric("平均持仓天数", f"{avg_holding:.1f} 天")
             st.metric("最终资金", f"{results['最终资金']:,.0f} 元")
     
-    # ========== 价格走势图 ==========
+    # ========== 价格走势图（使用Plotly，完美支持中文） ==========
     st.markdown("---")
     st.markdown("## 📊 价格走势与交易信号")
     
-    fig, ax = plt.subplots(figsize=(16, 6))
-    font_prop = get_chinese_font_prop()  # 确保字体属性已获取
+    # 创建Plotly图表
+    fig = go.Figure()
     
-    ax.plot(df_signals["date"], df_signals["futures_price"], 
-            color="#1f77b4", linewidth=1.5, alpha=0.7, label="PTA期货价格")
+    # 绘制PTA期货价格线
+    fig.add_trace(go.Scatter(
+        x=df_signals["date"],
+        y=df_signals["futures_price"],
+        mode='lines',
+        name='PTA期货价格',
+        line=dict(color='#1f77b4', width=1.5),
+        opacity=0.7,
+        hovertemplate='日期: %{x}<br>价格: %{y:,.0f} 元/吨<extra></extra>'
+    ))
     
+    # 绘制做多信号
     long_signals = df_signals[df_signals["long_signal"] == True]
-    short_signals = df_signals[df_signals["short_signal"] == True]
-    
     if len(long_signals) > 0:
-        ax.scatter(long_signals["date"], long_signals["futures_price"], 
-                  color="red", s=100, marker="^", zorder=5, 
-                  label=f"做多信号 ({len(long_signals)}次)", edgecolors="black", linewidths=1)
+        fig.add_trace(go.Scatter(
+            x=long_signals["date"],
+            y=long_signals["futures_price"],
+            mode='markers',
+            name=f'做多信号 ({len(long_signals)}次)',
+            marker=dict(
+                symbol='triangle-up',
+                size=12,
+                color='red',
+                line=dict(width=1, color='black')
+            ),
+            hovertemplate='日期: %{x}<br>价格: %{y:,.0f} 元/吨<extra></extra>'
+        ))
     
+    # 绘制做空信号
+    short_signals = df_signals[df_signals["short_signal"] == True]
     if len(short_signals) > 0:
-        ax.scatter(short_signals["date"], short_signals["futures_price"], 
-                  color="blue", s=100, marker="v", zorder=5, 
-                  label=f"做空信号 ({len(short_signals)}次)", edgecolors="black", linewidths=1)
+        fig.add_trace(go.Scatter(
+            x=short_signals["date"],
+            y=short_signals["futures_price"],
+            mode='markers',
+            name=f'做空信号 ({len(short_signals)}次)',
+            marker=dict(
+                symbol='triangle-down',
+                size=12,
+                color='blue',
+                line=dict(width=1, color='black')
+            ),
+            hovertemplate='日期: %{x}<br>价格: %{y:,.0f} 元/吨<extra></extra>'
+        ))
     
-    ax.set_xlabel("日期", fontproperties=font_prop, fontsize=12)
-    ax.set_ylabel("PTA期货价格（元/吨）", fontproperties=font_prop, fontsize=12)
-    ax.set_title("PTA期货价格走势与交易信号（⚠️ 使用期货价格，非现货）", fontproperties=font_prop, fontsize=14, fontweight="bold")
-    ax.legend(prop=font_prop, fontsize=10)
-    ax.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
+    # 设置图表布局
+    fig.update_layout(
+        title={
+            'text': 'PTA期货价格走势与交易信号（⚠️ 使用期货价格，非现货）',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 14, 'color': 'black'}
+        },
+        xaxis_title='日期',
+        yaxis_title='PTA期货价格（元/吨）',
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        height=500,
+        template='plotly_white',
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickangle=-45
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickformat=',.0f'
+        )
+    )
     
-    st.pyplot(fig)
-    plt.close()
+    st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.info("👆 请在上方上传数据文件并点击'开始回测'按钮执行回测")
