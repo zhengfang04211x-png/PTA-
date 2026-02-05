@@ -313,13 +313,62 @@ initial_capital = st.sidebar.number_input(
 )
 st.sidebar.caption("💡 回测的起始资金")
 
-# 回测时间段（如果有数据）
+# 回测时间段选择（如果有数据）
+backtest_start_date = None
+backtest_end_date = None
+
 if 'df' in st.session_state and st.session_state['df'] is not None:
     df_temp = st.session_state['df']
     if len(df_temp) > 0:
         min_date = df_temp['date'].min()
         max_date = df_temp['date'].max()
         st.sidebar.info(f"📅 数据时间范围：\n{min_date.strftime('%Y-%m-%d')} 至 {max_date.strftime('%Y-%m-%d')}")
+        
+        # 添加时间段选择器
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### ⏰ 回测时间段选择")
+        use_custom_range = st.sidebar.checkbox(
+            "自定义回测时间段",
+            value=False,
+            help="勾选后可以自定义回测的开始和结束时间",
+            key="use_custom_range"
+        )
+        
+        if use_custom_range:
+            # 将日期转换为datetime类型（如果还不是）
+            if isinstance(min_date, pd.Timestamp):
+                min_date_val = min_date.to_pydatetime().date()
+            else:
+                min_date_val = pd.to_datetime(min_date).date()
+            
+            if isinstance(max_date, pd.Timestamp):
+                max_date_val = max_date.to_pydatetime().date()
+            else:
+                max_date_val = pd.to_datetime(max_date).date()
+            
+            backtest_start_date = st.sidebar.date_input(
+                "回测开始日期",
+                value=min_date_val,
+                min_value=min_date_val,
+                max_value=max_date_val,
+                key="backtest_start_date"
+            )
+            
+            backtest_end_date = st.sidebar.date_input(
+                "回测结束日期",
+                value=max_date_val,
+                min_value=min_date_val,
+                max_value=max_date_val,
+                key="backtest_end_date"
+            )
+            
+            # 验证日期范围
+            if backtest_start_date >= backtest_end_date:
+                st.sidebar.warning("⚠️ 开始日期必须早于结束日期")
+            else:
+                st.sidebar.success(f"✅ 将回测 {backtest_start_date} 至 {backtest_end_date} 的数据")
+        else:
+            st.sidebar.caption("💡 未勾选时，将使用全部数据")
 
 # 信号灵敏度配置（expander，默认折叠）
 with st.sidebar.expander("🛠️ 信号灵敏度配置", expanded=False):
@@ -527,6 +576,36 @@ if run_backtest:
             
             # 加载数据
             df = load_merged_data_with_basis(data_path)
+            
+            # 根据选择的时间段过滤数据
+            use_custom_range_val = st.session_state.get('use_custom_range', False)
+            backtest_start_date_val = st.session_state.get('backtest_start_date', None)
+            backtest_end_date_val = st.session_state.get('backtest_end_date', None)
+            
+            if use_custom_range_val and backtest_start_date_val and backtest_end_date_val:
+                # 确保日期格式正确
+                if isinstance(backtest_start_date_val, pd.Timestamp):
+                    start_date = backtest_start_date_val
+                else:
+                    start_date = pd.to_datetime(backtest_start_date_val)
+                
+                if isinstance(backtest_end_date_val, pd.Timestamp):
+                    end_date = backtest_end_date_val
+                else:
+                    end_date = pd.to_datetime(backtest_end_date_val)
+                
+                # 过滤数据
+                df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
+                
+                if len(df) == 0:
+                    start_str = start_date.strftime('%Y-%m-%d') if hasattr(start_date, 'strftime') else str(start_date)
+                    end_str = end_date.strftime('%Y-%m-%d') if hasattr(end_date, 'strftime') else str(end_date)
+                    st.error(f"❌ 在 {start_str} 至 {end_str} 范围内没有数据")
+                    st.stop()
+                
+                start_str = start_date.strftime('%Y-%m-%d') if hasattr(start_date, 'strftime') else str(start_date)
+                end_str = end_date.strftime('%Y-%m-%d') if hasattr(end_date, 'strftime') else str(end_date)
+                st.info(f"📊 已筛选数据：{len(df)} 条记录（{start_str} 至 {end_str}）")
             
             # 生成交易信号
             df_signals = generate_signals(
@@ -848,6 +927,9 @@ if 'results' in st.session_state:
         if len(resonance_data) > 0:
             resonance_df = pd.DataFrame(resonance_data)
             
+            # 获取字体属性（用于matplotlib图表）
+            font_prop = get_chinese_font_prop()
+            
             # 统计共振情况
             resonance_counts = resonance_df['resonance'].value_counts()
             
@@ -951,6 +1033,9 @@ if 'results' in st.session_state:
             
             trades_df['exit_reason_zh'] = trades_df['exit_reason'].map(exit_reasons_map).fillna(trades_df['exit_reason'])
             exit_stats = trades_df['exit_reason_zh'].value_counts()
+            
+            # 获取字体属性（用于matplotlib图表）
+            font_prop = get_chinese_font_prop()
             
             # 绘制饼图
             fig, ax = plt.subplots(figsize=(8, 8))
