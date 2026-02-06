@@ -455,24 +455,14 @@ def backtest_strategy(df: pd.DataFrame,
                 # 1. 计算可用保证金（最多使用max_position_ratio比例的资金）
                 available_margin = capital * max_position_ratio
                 
-                # 2. 分级仓位：根据PTA生产利润调整仓位比例
-                actual_position_ratio = position_size
-                if CONFIG.ENABLE_DYNAMIC_POSITION and not pd.isna(current_margin):
-                    if current_margin < CONFIG.MARGIN_LOW_THRESHOLD:
-                        actual_position_ratio = min(position_size * CONFIG.POSITION_MULTIPLIER_LOW, max_position_ratio)
-                    elif current_margin > CONFIG.MARGIN_HIGH_THRESHOLD:
-                        actual_position_ratio = max(position_size * CONFIG.POSITION_MULTIPLIER_HIGH, 0.01)  # 至少1%
+                # 2. 实际投入的保证金 = 可用保证金 × 每次投入比例
+                # 注意：position_size已经是0-1之间的比例，不需要再限制
+                invested_margin = available_margin * position_size
                 
-                # 确保不超过最大仓位比例
-                actual_position_ratio = min(actual_position_ratio, max_position_ratio)
-                
-                # 3. 实际投入的保证金
-                invested_margin = available_margin * actual_position_ratio
-                
-                # 4. 根据保证金和杠杆倍数计算能控制的合约价值
+                # 3. 根据保证金和杠杆倍数计算能控制的合约价值
                 contract_value = invested_margin * leverage
                 
-                # 5. 计算能开的手数（向下取整）
+                # 4. 计算能开的手数（向下取整）
                 contracts = int(contract_value / (entry_price * contract_size))
                 
                 # 6. 如果手数为0，说明资金不足，跳过本次开仓
@@ -500,18 +490,15 @@ def backtest_strategy(df: pd.DataFrame,
                 
                 # 根据当前资金量计算最多能开多少手（做空逻辑相同）
                 available_margin = capital * max_position_ratio
-                actual_position_ratio = position_size
-                if CONFIG.ENABLE_DYNAMIC_POSITION and not pd.isna(current_margin):
-                    if current_margin < CONFIG.MARGIN_LOW_THRESHOLD:
-                        actual_position_ratio = min(position_size * CONFIG.POSITION_MULTIPLIER_LOW, max_position_ratio)
-                    elif current_margin > CONFIG.MARGIN_HIGH_THRESHOLD:
-                        actual_position_ratio = max(position_size * CONFIG.POSITION_MULTIPLIER_HIGH, 0.01)  # 至少1%
                 
-                # 确保不超过最大仓位比例
-                actual_position_ratio = min(actual_position_ratio, max_position_ratio)
+                # 实际投入的保证金 = 可用保证金 × 每次投入比例
+                # 注意：position_size已经是0-1之间的比例，不需要再限制
+                invested_margin = available_margin * position_size
                 
-                invested_margin = available_margin * actual_position_ratio
+                # 根据保证金和杠杆倍数计算能控制的合约价值
                 contract_value = invested_margin * leverage
+                
+                # 计算能开的手数（向下取整）
                 contracts = int(contract_value / (entry_price * contract_size))
                 
                 if contracts <= 0:
