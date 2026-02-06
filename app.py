@@ -1443,6 +1443,121 @@ if 'results' in st.session_state:
     )
     
     st.plotly_chart(fig, use_container_width=True)
+    
+    # ========== PX价差走势图（使用Plotly，完美支持中文） ==========
+    st.markdown("---")
+    st.markdown("## 📈 PX原料利润（价差）走势与交易信号")
+    
+    # 创建Plotly图表
+    fig_px = go.Figure()
+    
+    # 绘制PX价差线
+    fig_px.add_trace(go.Scatter(
+        x=df_signals["date"],
+        y=df_signals["px_naphtha_spread"],
+        mode='lines',
+        name='PX原料利润（价差）',
+        line=dict(color='#ff7f0e', width=2),
+        hovertemplate='日期: %{x}<br>PX价差: %{y:.2f} 元/吨<extra></extra>'
+    ))
+    
+    # 如果有动态阈值数据，绘制动态阈值线
+    if "dynamic_threshold" in df_signals.columns and "px_naphtha_spread" in df_signals.columns:
+        px_prev = df_signals["px_naphtha_spread"].shift(1)
+        dynamic_threshold = df_signals["dynamic_threshold"]
+        
+        # 上阈值线（做多信号触发线）
+        upper_threshold = px_prev * (1 + dynamic_threshold / 100)
+        fig_px.add_trace(go.Scatter(
+            x=df_signals["date"],
+            y=upper_threshold,
+            mode='lines',
+            name='做多信号阈值',
+            line=dict(color='green', width=1, dash='dash'),
+            opacity=0.5,
+            hovertemplate='日期: %{x}<br>阈值: %{y:.2f} 元/吨<extra></extra>'
+        ))
+        
+        # 下阈值线（做空信号触发线）
+        lower_threshold = px_prev * (1 - dynamic_threshold / 100)
+        fig_px.add_trace(go.Scatter(
+            x=df_signals["date"],
+            y=lower_threshold,
+            mode='lines',
+            name='做空信号阈值',
+            line=dict(color='red', width=1, dash='dash'),
+            opacity=0.5,
+            hovertemplate='日期: %{x}<br>阈值: %{y:.2f} 元/吨<extra></extra>'
+        ))
+    
+    # 绘制做多信号点（在PX价差图上）
+    if len(long_signals) > 0:
+        long_px_values = df_signals[df_signals["long_signal"] == True]["px_naphtha_spread"]
+        fig_px.add_trace(go.Scatter(
+            x=long_signals["date"],
+            y=long_px_values,
+            mode='markers',
+            name=f'做多信号 ({len(long_signals)}次)',
+            marker=dict(
+                symbol='triangle-up',
+                size=12,
+                color='red',
+                line=dict(width=1, color='black')
+            ),
+            hovertemplate='日期: %{x}<br>PX价差: %{y:.2f} 元/吨<extra></extra>'
+        ))
+    
+    # 绘制做空信号点（在PX价差图上）
+    if len(short_signals) > 0:
+        short_px_values = df_signals[df_signals["short_signal"] == True]["px_naphtha_spread"]
+        fig_px.add_trace(go.Scatter(
+            x=short_signals["date"],
+            y=short_px_values,
+            mode='markers',
+            name=f'做空信号 ({len(short_signals)}次)',
+            marker=dict(
+                symbol='triangle-down',
+                size=12,
+                color='blue',
+                line=dict(width=1, color='black')
+            ),
+            hovertemplate='日期: %{x}<br>PX价差: %{y:.2f} 元/吨<extra></extra>'
+        ))
+    
+    # 设置图表布局
+    fig_px.update_layout(
+        title={
+            'text': 'PX原料利润（价差）走势与交易信号',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 14, 'color': 'black'}
+        },
+        xaxis_title='日期',
+        yaxis_title='PX原料利润（价差，元/吨）',
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        height=500,
+        template='plotly_white',
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickangle=-45
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickformat=',.0f'
+        )
+    )
+    
+    st.plotly_chart(fig_px, use_container_width=True)
+    st.caption("💡 PX原料利润（价差）是策略的核心信号源，当价差变动超过动态阈值时触发交易信号")
 
 else:
     st.info("👆 请在上方上传数据文件并点击'开始回测'按钮执行回测")
