@@ -733,8 +733,36 @@ if run_backtest:
                 st.error(f"❌ 杠杆倍数{leverage:.1f}倍超过最大允许值{max_leverage:.1f}倍（最低保证金比例{CONFIG.MIN_MARGIN_RATE*100:.0f}%）")
                 st.stop()
             
-            # 加载数据
-            df = load_merged_data_with_basis(data_path)
+            # 加载数据（尝试从PTA.csv加载基差数据）
+            pta_csv_path = None
+            
+            # 检查data_path是否是上传的文件对象
+            if hasattr(data_path, 'name') or hasattr(data_path, 'read'):
+                # 是上传的文件对象，使用固定路径查找PTA.csv
+                possible_pta_paths = [
+                    Path(__file__).parent.parent / "PTA.csv",
+                    Path(__file__).parent.parent / "原始数据" / "PTA.csv",
+                ]
+            else:
+                # 是文件路径字符串
+                try:
+                    data_path_obj = Path(data_path)
+                    possible_pta_paths = [
+                        data_path_obj.parent.parent / "PTA.csv",
+                        data_path_obj.parent.parent.parent / "PTA.csv",
+                        Path(__file__).parent.parent / "PTA.csv",
+                    ]
+                except:
+                    possible_pta_paths = [
+                        Path(__file__).parent.parent / "PTA.csv",
+                    ]
+            
+            for path in possible_pta_paths:
+                if path.exists():
+                    pta_csv_path = str(path)
+                    break
+            
+            df = load_merged_data_with_basis(data_path, pta_csv_path=pta_csv_path)
             
             # 根据选择的时间段过滤数据
             use_custom_range_val = st.session_state.get('use_custom_range', False)

@@ -183,8 +183,84 @@ def load_merged_data_with_basis(merged_csv_path=None, pta_csv_path=None) -> pd.D
     basis_cols = [c for c in df.columns if "basis" in str(c).lower() or "基差" in str(c)]
     if basis_cols:
         result["basis"] = pd.to_numeric(df[basis_cols[0]], errors="coerce")
+        print(f"[数据加载] 从合并数据中找到基差列: {basis_cols[0]}")
     else:
         result["basis"] = np.nan
+    
+    # 如果合并数据中没有基差，尝试从PTA.csv加载
+    if result["basis"].isna().all() and pta_csv_path is not None:
+        try:
+            pta_path = Path(pta_csv_path)
+            if pta_path.exists():
+                print(f"[数据加载] 尝试从PTA.csv加载基差数据...")
+                pta_df = read_csv_with_encoding(pta_path)
+                
+                # 识别日期列
+                pta_date_cols = [c for c in pta_df.columns if "date" in str(c).lower() or "日期" in str(c) or "时间" in str(c)]
+                if not pta_date_cols:
+                    for c in pta_df.columns:
+                        try:
+                            s = pd.to_datetime(pta_df[c], errors="coerce")
+                            if s.notna().sum() >= len(pta_df) * 0.5:
+                                pta_date_cols = [c]
+                                break
+                        except:
+                            continue
+                
+                if pta_date_cols:
+                    pta_date_col = pta_date_cols[0]
+                    pta_df[pta_date_col] = pd.to_datetime(pta_df[pta_date_col], errors="coerce")
+                    
+                    # 识别现货价格列
+                    spot_cols = [c for c in pta_df.columns if "现货" in str(c) and "价格" in str(c)]
+                    if not spot_cols:
+                        spot_cols = [c for c in pta_df.columns if "spot" in str(c).lower() and "price" in str(c).lower()]
+                    
+                    # 识别期货价格列（主力合约）
+                    pta_futures_cols = [c for c in pta_df.columns if "主力合约" in str(c) and "价格" in str(c)]
+                    if not pta_futures_cols:
+                        pta_futures_cols = [c for c in pta_df.columns if "期货" in str(c) and "价格" in str(c) and "现货" not in str(c)]
+                    
+                    # 如果有现货和期货价格，计算基差
+                    if spot_cols and pta_futures_cols:
+                        pta_basis_df = pd.DataFrame({
+                            "date": pta_df[pta_date_col],
+                            "spot_price": pd.to_numeric(pta_df[spot_cols[0]], errors="coerce"),
+                            "futures_price_pta": pd.to_numeric(pta_df[pta_futures_cols[0]], errors="coerce")
+                        })
+                        pta_basis_df = pta_basis_df.dropna()
+                        # 计算基差：期货价格 - 现货价格
+                        pta_basis_df["basis"] = pta_basis_df["futures_price_pta"] - pta_basis_df["spot_price"]
+                        
+                        # 合并基差数据
+                        result = pd.merge_asof(
+                            result.sort_values("date"),
+                            pta_basis_df[["date", "basis"]].sort_values("date"),
+                            on="date",
+                            direction="nearest",
+                            tolerance=pd.Timedelta(days=7)  # 允许7天内的最近匹配
+                        )
+                        print(f"[数据加载] ✅ 成功从PTA.csv加载基差数据，有效数据: {result['basis'].notna().sum()} 条")
+                    else:
+                        # 尝试直接查找基差列（可能是负数）
+                        pta_basis_cols = [c for c in pta_df.columns if "基差" in str(c)]
+                        if pta_basis_cols:
+                            pta_basis_df = pd.DataFrame({
+                                "date": pta_df[pta_date_col],
+                                "basis": pd.to_numeric(pta_df[pta_basis_cols[0]], errors="coerce")
+                            })
+                            pta_basis_df = pta_basis_df.dropna()
+                            
+                            result = pd.merge_asof(
+                                result.sort_values("date"),
+                                pta_basis_df.sort_values("date"),
+                                on="date",
+                                direction="nearest",
+                                tolerance=pd.Timedelta(days=7)
+                            )
+                            print(f"[数据加载] ✅ 成功从PTA.csv加载基差列，有效数据: {result['basis'].notna().sum()} 条")
+        except Exception as e:
+            print(f"[数据加载] ⚠️ 从PTA.csv加载基差数据失败: {e}")
     
     result = result.dropna(subset=["date", "futures_price", "px_naphtha_spread"])
     result = result.sort_values("date").reset_index(drop=True)
