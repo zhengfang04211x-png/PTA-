@@ -26,16 +26,24 @@ import urllib.request
 import os
 import tempfile
 
-# 配置matplotlib中文字体（兼容Streamlit Cloud）
+# 配置matplotlib中文字体（兼容Streamlit Cloud和GitHub）
 def download_chinese_font():
-    """下载中文字体文件到临时目录（用于Streamlit Cloud）"""
-    # 使用 Noto Sans CJK SC 字体（Google开源中文字体）
-    # 使用 GitHub 上的 TTF 字体文件（更可靠）
-    font_url = "https://github.com/google/fonts/raw/main/ofl/notosanscjksc/NotoSansCJKsc-Regular.otf"
+    """下载中文字体文件到临时目录（用于Streamlit Cloud和GitHub）"""
+    # 尝试多个字体源，确保可靠性
+    font_urls = [
+        # TTF格式（更兼容）
+        "https://github.com/google/fonts/raw/main/ofl/notosanscjksc/NotoSansCJKsc-Regular.ttf",
+        # OTF格式（备用）
+        "https://github.com/google/fonts/raw/main/ofl/notosanscjksc/NotoSansCJKsc-Regular.otf",
+        # CDN备用源
+        "https://fonts.gstatic.com/s/notosanssc/v36/k3kCo84MPvpLmixcA63oeAL7Iqp5IR3j.woff2",
+    ]
     
-    # 如果URL是OTF格式，尝试转换为TTF或直接使用
-    # 实际上，matplotlib支持OTF格式，所以可以直接使用
-    font_name = "NotoSansCJKsc-Regular.otf"
+    font_names = [
+        "NotoSansCJKsc-Regular.ttf",
+        "NotoSansCJKsc-Regular.otf",
+        "NotoSansCJKsc-Regular.woff2"
+    ]
     
     # 获取matplotlib字体目录
     try:
@@ -47,37 +55,62 @@ def download_chinese_font():
         font_dir = Path(tempfile.gettempdir()) / "matplotlib_fonts"
     
     font_dir.mkdir(parents=True, exist_ok=True)
-    font_path = font_dir / font_name
     
-    # 如果字体文件已存在，直接返回
-    if font_path.exists() and font_path.stat().st_size > 0:
-        return str(font_path)
-    
-    # 尝试下载字体文件
-    try:
-        # 设置超时时间（10秒）
-        with urllib.request.urlopen(font_url, timeout=10) as response:
-            with open(font_path, 'wb') as f:
-                f.write(response.read())
+    # 尝试每个字体源
+    for font_url, font_name in zip(font_urls, font_names):
+        font_path = font_dir / font_name
         
-        # 验证文件是否下载成功
-        if font_path.exists() and font_path.stat().st_size > 1000:  # 至少1KB
-            # 清除matplotlib字体缓存，强制重新加载
+        # 如果字体文件已存在，直接返回
+        if font_path.exists() and font_path.stat().st_size > 1000:
             try:
-                # 将字体文件添加到matplotlib的字体路径
                 font_manager.fontManager.addfont(str(font_path))
-                font_manager._rebuild()
+                return str(font_path)
             except:
-                pass
-            return str(font_path)
-    except Exception as e:
-        # 下载失败，返回None
-        return None
+                continue
+        
+        # 尝试下载字体文件
+        try:
+            # 设置超时时间（15秒）
+            req = urllib.request.Request(font_url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            with urllib.request.urlopen(req, timeout=15) as response:
+                with open(font_path, 'wb') as f:
+                    f.write(response.read())
+            
+            # 验证文件是否下载成功
+            if font_path.exists() and font_path.stat().st_size > 1000:  # 至少1KB
+                # 清除matplotlib字体缓存，强制重新加载
+                try:
+                    font_manager.fontManager.addfont(str(font_path))
+                    font_manager._rebuild()
+                except:
+                    pass
+                return str(font_path)
+        except Exception as e:
+            # 下载失败，尝试下一个源
+            continue
     
     return None
 
 def setup_chinese_font():
-    """配置matplotlib中文字体，兼容Streamlit Cloud环境"""
+    """配置matplotlib中文字体，兼容Streamlit Cloud和GitHub环境"""
+    # 首先尝试下载字体（适用于GitHub/Cloud环境）
+    downloaded_font_path = download_chinese_font()
+    if downloaded_font_path:
+        try:
+            # 使用下载的字体文件
+            font_prop = font_manager.FontProperties(fname=downloaded_font_path)
+            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + plt.rcParams['font.sans-serif']
+            plt.rcParams['axes.unicode_minus'] = False
+            # 清除matplotlib字体缓存，强制重新加载
+            try:
+                font_manager._rebuild()
+            except:
+                pass
+            return font_prop
+        except Exception as e:
+            pass
+    
     # 尝试使用系统中文字体（按优先级排序）
     chinese_fonts = [
         "Microsoft YaHei", "Microsoft YaHei UI", 
@@ -108,23 +141,6 @@ def setup_chinese_font():
                 return font_manager.FontProperties(family=font)
             except Exception as e:
                 continue
-    
-    # 如果找不到中文字体，尝试下载字体文件（用于Streamlit Cloud）
-    downloaded_font_path = download_chinese_font()
-    if downloaded_font_path:
-        try:
-            # 使用下载的字体文件
-            font_prop = font_manager.FontProperties(fname=downloaded_font_path)
-            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC'] + plt.rcParams['font.sans-serif']
-            plt.rcParams['axes.unicode_minus'] = False
-            # 清除matplotlib字体缓存，强制重新加载
-            try:
-                font_manager._rebuild()
-            except:
-                pass
-            return font_prop
-        except Exception as e:
-            pass
     
     # 如果都失败，尝试使用系统默认sans-serif字体
     plt.rcParams['axes.unicode_minus'] = False
@@ -1231,28 +1247,79 @@ if 'results' in st.session_state:
             # 获取字体属性（用于matplotlib图表）
             font_prop = get_chinese_font_prop()
             
-            # 绘制饼图
-            fig, ax = plt.subplots(figsize=(8, 8))
-            colors = plt.cm.Set3(range(len(exit_stats)))
-            wedges, texts, autotexts = ax.pie(
-                exit_stats.values,
-                labels=exit_stats.index,
-                autopct='%1.1f%%',
-                startangle=90,
-                colors=colors,
-                textprops={'fontproperties': font_prop, 'fontsize': 10}
-            )
-            
-            # 美化文字
-            for autotext in autotexts:
-                autotext.set_color('black')
-                autotext.set_fontweight('bold')
-                autotext.set_fontsize(11)
-            
-            ax.set_title('平仓原因占比', fontproperties=font_prop, fontsize=14, fontweight='bold', pad=20)
-            
-            st.pyplot(fig)
-            plt.close()
+            # 绘制饼图 - 使用Plotly以确保在GitHub上正确显示中文
+            try:
+                import plotly.graph_objects as go
+                
+                # 使用Plotly绘制饼图（更好的中文支持）
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=exit_stats.index.tolist(),
+                    values=exit_stats.values.tolist(),
+                    hole=0.3,
+                    textinfo='label+percent',
+                    textposition='outside',
+                    marker=dict(
+                        colors=plt.cm.Set3(range(len(exit_stats))),
+                        line=dict(color='#FFFFFF', width=2)
+                    ),
+                    hovertemplate='<b>%{label}</b><br>数量: %{value}<br>占比: %{percent}<extra></extra>'
+                )])
+                
+                fig_pie.update_layout(
+                    title={
+                        'text': '平仓原因分布',
+                        'x': 0.5,
+                        'xanchor': 'center',
+                        'font': {'size': 16, 'family': 'Arial Unicode MS, Microsoft YaHei, SimHei, sans-serif'}
+                    },
+                    font={'family': 'Arial Unicode MS, Microsoft YaHei, SimHei, sans-serif', 'size': 12},
+                    showlegend=True,
+                    legend=dict(
+                        orientation="v",
+                        yanchor="middle",
+                        y=0.5,
+                        xanchor="left",
+                        x=1.05,
+                        font={'size': 11, 'family': 'Arial Unicode MS, Microsoft YaHei, SimHei, sans-serif'}
+                    ),
+                    margin=dict(l=20, r=150, t=50, b=20)
+                )
+                
+                st.plotly_chart(fig_pie, use_container_width=True)
+                
+            except Exception as e:
+                # 如果Plotly失败，回退到matplotlib
+                fig, ax = plt.subplots(figsize=(8, 8))
+                colors = plt.cm.Set3(range(len(exit_stats)))
+                
+                # 确保字体属性正确设置
+                if font_prop is None:
+                    font_prop = get_chinese_font_prop()
+                
+                wedges, texts, autotexts = ax.pie(
+                    exit_stats.values,
+                    labels=exit_stats.index,
+                    autopct='%1.1f%%',
+                    startangle=90,
+                    colors=colors,
+                    textprops={'fontproperties': font_prop, 'fontsize': 10}
+                )
+                
+                # 美化文字 - 确保所有文字都使用正确的字体
+                for text in texts:
+                    text.set_fontproperties(font_prop)
+                    text.set_fontsize(10)
+                
+                for autotext in autotexts:
+                    autotext.set_color('black')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(11)
+                    autotext.set_fontproperties(font_prop)
+                
+                ax.set_title('平仓原因占比', fontproperties=font_prop, fontsize=14, fontweight='bold', pad=20)
+                
+                st.pyplot(fig)
+                plt.close()
             
             # 显示统计说明
             st.caption("💡 这能证明我们的策略是有理有据地进出，而不是盲目持仓")
